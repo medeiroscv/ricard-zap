@@ -70,11 +70,46 @@ def get_chatwoot_headers() -> dict:
 # Cria a aplicação FastAPI
 app = FastAPI(title="Ponte Ricard-ZAP", version="1.0.0")
 
+def extract_phone_number(sender_raw: str) -> str:
+    """
+    Extrai o número de telefone do formato do WuzAPI.
+    Exemplos:
+    - 553491115553:30@s.whatsapp.net -> 553491115553
+    - 553496616325@s.whatsapp.net -> 553496616325
+    """
+    # Remove o @s.whatsapp.net ou @g.us
+    phone_with_suffix = sender_raw.split('@')[0]
+    
+    # Remove sufixos como :30, :1, etc (comum em números comerciais)
+    # Formato: número:sufixo
+    if ':' in phone_with_suffix:
+        phone_with_suffix = phone_with_suffix.split(':')[0]
+    
+    # Remove qualquer caractere não numérico
+    clean_phone = re.sub(r'[^0-9]', '', phone_with_suffix)
+    
+    return clean_phone
+
+def format_phone_for_chatwoot(phone_number: str) -> str:
+    """
+    Formata o número de telefone para o padrão do Chatwoot.
+    Exemplo: 553491115553 -> +553491115553
+    """
+    # Remove qualquer caractere não numérico
+    clean = re.sub(r'[^0-9]', '', phone_number)
+    
+    # Garante que tem o código do país (55 para Brasil)
+    if not clean.startswith('55'):
+        clean = f"55{clean}"
+    
+    # Adiciona o + na frente
+    return f"+{clean}"
+
 # --- FUNÇÕES DE INTERAÇÃO COM O CHATWOOT ---
 
 def search_contact(phone_number: str):
     """Busca um contato no Chatwoot pelo número de telefone."""
-    # Remove caracteres especiais do número
+    # Limpa o número para busca
     search_phone = re.sub(r'[^0-9]', '', phone_number)
     search_endpoint = f"{CHATWOOT_URL}/api/v1/accounts/{CHATWOOT_ACCOUNT_ID}/contacts/search"
     params = {'q': search_phone}
@@ -84,7 +119,7 @@ def search_contact(phone_number: str):
         response = requests.get(search_endpoint, headers=get_chatwoot_headers(), params=params, timeout=10)
         
         if response.status_code != 200:
-            logger.error(f"Erro na busca: {response.status_code} - {response.text}")
+            logger.error(f"Erro na busca: {response.status_code}")
             return None
             
         data = response.json()
@@ -92,8 +127,8 @@ def search_contact(phone_number: str):
         if data.get("meta", {}).get("count", 0) > 0:
             for contact in data.get("payload", []):
                 contact_phone = re.sub(r'[^0-9]', '', contact.get("phone_number", ""))
-                if contact_phone == search_phone or search_phone in contact_phone:
-                    logger.info(f"✅ Contato encontrado: ID {contact['id']}")
+                if contact_phone == search_phone or search_phone in contact_phone or contact_phone in search_phone:
+                    logger.info(f"✅ Contato encontrado: ID {contact['id']} - Telefone: {contact.get('phone_number')}")
                     return contact
         
         logger.info(f"❌ Contato não encontrado")
@@ -106,12 +141,8 @@ def create_contact(name: str, phone_number: str):
     """Cria um novo contato no Chatwoot."""
     contact_endpoint = f"{CHATWOOT_URL}/api/v1/accounts/{CHATWOOT_ACCOUNT_ID}/contacts"
     
-    # Limpa o número de telefone
-    clean_phone = re.sub(r'[^0-9]', '', phone_number)
-    if not clean_phone.startswith('55'):
-        clean_phone = f"55{clean_phone}"
-    
-    formatted_phone = f"+{clean_phone}"
+    # Formata o número corretamente
+    formatted_phone = format_phone_for_chatwoot(phone_number)
         
     payload = {
         "inbox_id": int(CHATWOOT_INBOX_ID),
@@ -128,7 +159,7 @@ def create_contact(name: str, phone_number: str):
             return None
             
         contact = response.json()["payload"]["contact"]
-        logger.info(f"✅ Contato criado: ID {contact['id']}")
+        logger.info(f"✅ Contato criado: ID {contact['id']} - Telefone: {contact.get('phone_number')}")
         return contact
     except Exception as e:
         logger.error(f"❌ Erro ao criar contato: {e}")
@@ -136,12 +167,15 @@ def create_contact(name: str, phone_number: str):
 
 def search_or_create_contact(name: str, phone_number: str) -> Optional[int]:
     """Busca um contato e, se não encontrar, cria um novo."""
-    contact = search_contact(phone_number)
+    # Extrai o número limpo
+    clean_phone = extract_phone_number(phone_number)
+    
+    contact = search_contact(clean_phone)
     
     if contact:
         return contact['id']
     
-    new_contact = create_contact(name, phone_number)
+    new_contact = create_contact(name, clean_phone)
     if new_contact:
         return new_contact['id']
     
@@ -254,21 +288,11 @@ async def handle_wuzapi_webhook(request: Request):
         
         logger.info(f"Sender raw: {sender_raw}")
         
-        # CORREÇÃO IMPORTANTE: Verificar se é mensagem de grupo
-        # O Chat JID é onde a mensagem foi enviada
+        # Verificar se é mensagem de grupo
         chat_jid = info.get('Chat') or info.get('ChatJid') or sender_raw
         
-        # Se o chat_jid for um grupo (@g.us), é uma mensagem enviada PARA um grupo
-        # Nesse caso, precisamos verificar se a mensagem é do remetente individual ou do grupo
-        is_group_message = False
-        
-        # Se o chat onde a mensagem foi enviada é um grupo
+        # Se o chat onde a mensagem foi enviada é um grupo, ignorar
         if "@g.us" in str(chat_jid):
-            is_group_message = True
-            logger.info(f"Mensagem enviada para grupo: {chat_jid}")
-        
-        # Se for mensagem de grupo, ignorar (você pode mudar isso se quiser processar grupos)
-        if is_group_message:
             logger.info(f"Ignorando mensagem de grupo")
             return {"status": "ignored", "reason": "group chat"}
         
@@ -283,8 +307,8 @@ async def handle_wuzapi_webhook(request: Request):
             logger.warning("Mensagem sem conteúdo")
             return {"status": "ignored", "reason": "empty content"}
         
-        # Dados do contato - remove caracteres especiais
-        sender_phone = re.sub(r'[^0-9]', '', sender_raw.split('@')[0])
+        # Extrair número do telefone corretamente
+        sender_phone = extract_phone_number(sender_raw)
         sender_name = info.get("PushName") or info.get("pushName") or sender_phone
         
         logger.info(f"Processando: {sender_name} ({sender_phone})")
@@ -354,8 +378,8 @@ async def handle_chatwoot_webhook(request: Request):
             logger.error("Telefone não encontrado")
             return {"status": "error", "reason": "phone not found"}
         
-        # Limpar número
-        destination = re.sub(r"\D", "", contact_phone)
+        # Limpar número para envio (apenas números)
+        destination = re.sub(r'\D', '', contact_phone)
         
         # Enviar mensagem
         send_message_via_wuzapi(destination, content)
