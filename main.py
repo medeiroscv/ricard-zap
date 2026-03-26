@@ -11,7 +11,7 @@ import logging
 from logging.handlers import RotatingFileHandler
 
 # Configuração de logging
-logging.basicConfig(level=logging.DEBUG)  # Mudado para DEBUG para mais detalhes
+logging.basicConfig(level=logging.DEBUG)
 logger = logging.getLogger(__name__)
 
 # Adicionar handler para arquivo rotativo
@@ -115,21 +115,35 @@ def search_contact(phone_number: str):
     params = {'q': search_phone}
     
     try:
-        logger.debug(f"Buscando contato: {search_phone}")
+        logger.info(f"🔍 Buscando contato: {search_phone}")
+        logger.debug(f"URL: {search_endpoint}")
+        logger.debug(f"Headers: {get_chatwoot_headers()}")
+        
         response = requests.get(search_endpoint, headers=get_chatwoot_headers(), params=params, timeout=10)
+        
+        logger.info(f"📡 Resposta Chatwoot - Status: {response.status_code}")
+        logger.debug(f"Resposta bruta: {response.text[:500]}")
+        
         response.raise_for_status()
         data = response.json()
         
+        logger.info(f"📊 Meta count: {data.get('meta', {}).get('count', 0)}")
+        
         if data.get("meta", {}).get("count", 0) > 0:
             for contact in data.get("payload", []):
-                if contact.get("phone_number", "").endswith(search_phone):
-                    logger.info(f"Contato encontrado: ID {contact['id']} para {phone_number}")
+                contact_phone = contact.get("phone_number", "")
+                logger.debug(f"Comparando: {contact_phone} com {search_phone}")
+                
+                if contact_phone.endswith(search_phone):
+                    logger.info(f"✅ Contato encontrado: ID {contact['id']} - Nome: {contact.get('name')} - Telefone: {contact_phone}")
                     return contact
         
-        logger.info(f"Nenhum contato encontrado para {phone_number}")
+        logger.info(f"❌ Nenhum contato encontrado para {phone_number}")
         return None
     except Exception as e:
-        logger.error(f"Erro ao buscar contato {phone_number}: {e}")
+        logger.error(f"❌ Erro ao buscar contato: {e}")
+        if hasattr(e, 'response') and e.response:
+            logger.error(f"Resposta de erro: {e.response.text}")
         return None
 
 def create_contact(name: str, phone_number: str, avatar_url: Optional[str] = None):
@@ -148,16 +162,22 @@ def create_contact(name: str, phone_number: str, avatar_url: Optional[str] = Non
         payload["avatar_url"] = avatar_url
     
     try:
-        logger.info(f"Criando contato: {name} ({phone_number})")
+        logger.info(f"📝 Criando contato: {name} ({phone_number})")
+        logger.debug(f"Payload: {json.dumps(payload, indent=2)}")
+        
         response = requests.post(contact_endpoint, headers=get_chatwoot_headers(), json=payload, timeout=10)
+        
+        logger.info(f"📡 Resposta Chatwoot - Status: {response.status_code}")
+        logger.debug(f"Resposta: {response.text}")
+        
         response.raise_for_status()
         contact = response.json()["payload"]["contact"]
-        logger.info(f"Contato criado: ID {contact['id']}")
+        logger.info(f"✅ Contato criado: ID {contact['id']}")
         return contact
     except Exception as e:
-        logger.error(f"Erro ao criar contato {name}: {e}")
+        logger.error(f"❌ Erro ao criar contato: {e}")
         if hasattr(e, 'response') and e.response:
-            logger.error(f"Resposta: {e.response.text}")
+            logger.error(f"Resposta de erro: {e.response.text}")
         return None
 
 def search_or_create_contact(name: str, phone_number: str, avatar_url: Optional[str] = None) -> Optional[int]:
@@ -185,27 +205,42 @@ def find_or_create_conversation(contact_id: int) -> Optional[int]:
     conv_endpoint = f"{CHATWOOT_URL}/api/v1/accounts/{CHATWOOT_ACCOUNT_ID}/contacts/{contact_id}/conversations"
     
     try:
-        logger.debug(f"Buscando conversas para contato {contact_id}")
+        logger.info(f"💬 Buscando conversas para contato {contact_id}")
         response = requests.get(conv_endpoint, headers=get_chatwoot_headers(), timeout=10)
+        
+        logger.info(f"📡 Resposta Chatwoot - Status: {response.status_code}")
+        logger.debug(f"Resposta: {response.text[:500]}")
+        
         response.raise_for_status()
         conversations = response.json().get("payload", [])
         
         if conversations:
             conv_id = conversations[0]['id']
-            logger.info(f"Conversa encontrada: ID {conv_id}")
+            logger.info(f"✅ Conversa encontrada: ID {conv_id}")
+            logger.info(f"   Status: {conversations[0].get('status')}")
+            logger.info(f"   Mensagens: {conversations[0].get('message_count', 0)}")
             return conv_id
         
-        logger.info(f"Criando nova conversa para contato {contact_id}")
+        logger.info(f"🆕 Criando nova conversa para contato {contact_id}")
         create_conv_endpoint = f"{CHATWOOT_URL}/api/v1/accounts/{CHATWOOT_ACCOUNT_ID}/conversations"
         payload = {"inbox_id": CHATWOOT_INBOX_ID, "contact_id": contact_id}
+        
+        logger.debug(f"Payload criação conversa: {json.dumps(payload, indent=2)}")
+        
         create_response = requests.post(create_conv_endpoint, headers=get_chatwoot_headers(), json=payload, timeout=10)
+        
+        logger.info(f"📡 Resposta Chatwoot - Status: {create_response.status_code}")
+        logger.debug(f"Resposta: {create_response.text}")
+        
         create_response.raise_for_status()
         new_conv_id = create_response.json()['id']
-        logger.info(f"Conversa criada: ID {new_conv_id}")
+        logger.info(f"✅ Conversa criada: ID {new_conv_id}")
         return new_conv_id
         
     except Exception as e:
-        logger.error(f"Erro ao buscar/criar conversa para contato {contact_id}: {e}")
+        logger.error(f"❌ Erro ao buscar/criar conversa: {e}")
+        if hasattr(e, 'response') and e.response:
+            logger.error(f"Resposta de erro: {e.response.text}")
         return None
 
 def send_message_to_conversation(conversation_id: int, message_content: str):
@@ -214,15 +249,33 @@ def send_message_to_conversation(conversation_id: int, message_content: str):
     payload = {"content": message_content, "message_type": "incoming"}
     
     try:
-        logger.debug(f"Enviando mensagem para conversa {conversation_id}")
+        logger.info(f"📤 Enviando mensagem para conversa {conversation_id}")
+        logger.info(f"   Conteúdo: {message_content[:100]}...")
+        logger.debug(f"   Payload completo: {json.dumps(payload, indent=2)}")
+        logger.debug(f"   URL: {message_endpoint}")
+        logger.debug(f"   Headers: {get_chatwoot_headers()}")
+        
         response = requests.post(message_endpoint, headers=get_chatwoot_headers(), json=payload, timeout=10)
-        response.raise_for_status()
-        logger.info(f"✅ Mensagem enviada com sucesso para conversa {conversation_id}")
-        return response.json()
+        
+        logger.info(f"📡 Resposta Chatwoot - Status: {response.status_code}")
+        logger.info(f"   Response Headers: {dict(response.headers)}")
+        logger.info(f"   Response Body: {response.text[:500]}")
+        
+        if response.status_code == 200:
+            response_data = response.json()
+            logger.info(f"✅ Mensagem enviada com sucesso!")
+            logger.info(f"   ID da mensagem: {response_data.get('id')}")
+            logger.info(f"   Criada em: {response_data.get('created_at')}")
+            return response_data
+        else:
+            logger.error(f"❌ Falha ao enviar mensagem. Status: {response.status_code}")
+            logger.error(f"   Resposta: {response.text}")
+            return None
+            
     except Exception as e:
-        logger.error(f"❌ Erro ao enviar mensagem para conversa {conversation_id}: {e}")
+        logger.error(f"❌ Erro ao enviar mensagem: {e}")
         if hasattr(e, 'response') and e.response:
-            logger.error(f"Resposta: {e.response.text}")
+            logger.error(f"Resposta de erro: {e.response.text}")
         return None
 
 def get_conversation_phone_number(conversation_id: int) -> Optional[str]:
@@ -439,17 +492,21 @@ async def handle_wuzapi_webhook(request: Request):
             logger.error("Falha ao criar contato")
             return {"status": "error", "reason": "contact creation failed"}
         
+        logger.info(f"✅ Contact ID obtido: {contact_id}")
+        
         conversation_id = find_or_create_conversation(contact_id)
         if not conversation_id:
             logger.error("Falha ao criar conversa")
             return {"status": "error", "reason": "conversation creation failed"}
+        
+        logger.info(f"✅ Conversation ID obtido: {conversation_id}")
         
         # Enviar mensagem
         result = send_message_to_conversation(conversation_id, message_content)
         
         if result:
             logger.info(f"✅ Mensagem entregue ao Chatwoot - Conversa: {conversation_id}")
-            return {"status": "success", "conversation_id": conversation_id}
+            return {"status": "success", "conversation_id": conversation_id, "message_id": result.get('id')}
         else:
             logger.error("❌ Falha ao entregar mensagem ao Chatwoot")
             return {"status": "error", "reason": "chatwoot delivery failed"}
@@ -573,6 +630,75 @@ async def debug_full_webhook(request: Request):
         print(f"Erro no debug: {e}")
         return {"error": str(e)}
 
+@app.get("/debug/chatwoot/conversations")
+async def debug_chatwoot_conversations():
+    """Lista as últimas conversas no Chatwoot para diagnóstico"""
+    try:
+        url = f"{CHATWOOT_URL}/api/v1/accounts/{CHATWOOT_ACCOUNT_ID}/conversations"
+        params = {"status": "all", "limit": 10}
+        
+        response = requests.get(url, headers=get_chatwoot_headers(), params=params, timeout=10)
+        
+        if response.status_code == 200:
+            data = response.json()
+            conversations = data.get("payload", [])
+            
+            result = {
+                "total": len(conversations),
+                "conversations": []
+            }
+            
+            for conv in conversations[:5]:  # Mostrar últimas 5
+                result["conversations"].append({
+                    "id": conv.get("id"),
+                    "status": conv.get("status"),
+                    "contact_id": conv.get("contact_id"),
+                    "contact_name": conv.get("contact", {}).get("name"),
+                    "contact_phone": conv.get("contact", {}).get("phone_number"),
+                    "message_count": conv.get("message_count"),
+                    "created_at": conv.get("created_at"),
+                    "last_activity_at": conv.get("last_activity_at")
+                })
+            
+            return result
+        else:
+            return {"error": f"Status {response.status_code}", "response": response.text}
+    except Exception as e:
+        return {"error": str(e)}
+
+@app.get("/debug/chatwoot/contacts")
+async def debug_chatwoot_contacts():
+    """Lista os últimos contatos no Chatwoot para diagnóstico"""
+    try:
+        url = f"{CHATWOOT_URL}/api/v1/accounts/{CHATWOOT_ACCOUNT_ID}/contacts"
+        params = {"sort": "-created_at", "limit": 10}
+        
+        response = requests.get(url, headers=get_chatwoot_headers(), params=params, timeout=10)
+        
+        if response.status_code == 200:
+            data = response.json()
+            contacts = data.get("payload", [])
+            
+            result = {
+                "total": len(contacts),
+                "contacts": []
+            }
+            
+            for contact in contacts[:10]:
+                result["contacts"].append({
+                    "id": contact.get("id"),
+                    "name": contact.get("name"),
+                    "phone_number": contact.get("phone_number"),
+                    "email": contact.get("email"),
+                    "created_at": contact.get("created_at")
+                })
+            
+            return result
+        else:
+            return {"error": f"Status {response.status_code}", "response": response.text}
+    except Exception as e:
+        return {"error": str(e)}
+
 @app.get("/")
 async def root():
     """Endpoint de teste."""
@@ -669,74 +795,4 @@ async def test_chatwoot():
             "name": "Teste EasyPanel",
             "phone_number": "+5511999999999"
         }
-        response = requests.post(contact_url, headers=get_chatwoot_headers(), json=payload, timeout=10)
-        results["create_contact"] = {
-            "status": response.status_code,
-            "success": response.status_code == 200,
-            "response": response.text[:200] if response.status_code == 200 else response.text
-        }
-        
-        if response.status_code == 200:
-            contact_data = response.json()
-            contact_id = contact_data["payload"]["contact"]["id"]
-            results["contact_id"] = contact_id
-            
-            # Teste 3: Criar conversa
-            conv_url = f"{CHATWOOT_URL}/api/v1/accounts/{CHATWOOT_ACCOUNT_ID}/conversations"
-            conv_payload = {
-                "inbox_id": CHATWOOT_INBOX_ID,
-                "contact_id": contact_id
-            }
-            conv_response = requests.post(conv_url, headers=get_chatwoot_headers(), json=conv_payload, timeout=10)
-            results["create_conversation"] = {
-                "status": conv_response.status_code,
-                "success": conv_response.status_code == 200
-            }
-            
-            if conv_response.status_code == 200:
-                conv_id = conv_response.json()["id"]
-                results["conversation_id"] = conv_id
-                
-                # Teste 4: Enviar mensagem
-                msg_url = f"{CHATWOOT_URL}/api/v1/accounts/{CHATWOOT_ACCOUNT_ID}/conversations/{conv_id}/messages"
-                msg_payload = {
-                    "content": "Mensagem de teste da ponte",
-                    "message_type": "incoming"
-                }
-                msg_response = requests.post(msg_url, headers=get_chatwoot_headers(), json=msg_payload, timeout=10)
-                results["send_message"] = {
-                    "status": msg_response.status_code,
-                    "success": msg_response.status_code == 200
-                }
-    except Exception as e:
-        results["create_contact"] = {"error": str(e)}
-    
-    return results
-
-@app.post("/test/wuzapi")
-async def test_wuzapi():
-    """Testa a conexão com WuzAPI"""
-    results = {}
-    
-    # Teste 1: Verificar status
-    try:
-        status_url = f"{WUZAPI_API_URL}/status"
-        headers = {"token": WUZAPI_API_TOKEN}
-        response = requests.get(status_url, headers=headers, timeout=10)
-        results["status"] = {
-            "status_code": response.status_code,
-            "success": response.status_code == 200,
-            "response": response.text[:200]
-        }
-    except Exception as e:
-        results["status"] = {"error": str(e)}
-    
-    # Teste 2: Enviar mensagem de teste (opcional)
-    # results["send_message"] = "Teste desabilitado para não enviar spam"
-    
-    return results
-
-# Executar aplicação
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=9000)
+        response
