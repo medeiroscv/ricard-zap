@@ -5,10 +5,9 @@ import requests
 import json
 from dotenv import load_dotenv
 import re
-from datetime import datetime, timedelta
-from typing import Optional, Dict, Any
+from datetime import datetime
+from typing import Optional
 import logging
-from logging.handlers import RotatingFileHandler
 import uvicorn
 
 # Configuração de logging
@@ -84,7 +83,7 @@ def search_contact(phone_number: str):
         response = requests.get(search_endpoint, headers=get_chatwoot_headers(), params=params, timeout=10)
         
         if response.status_code != 200:
-            logger.error(f"Erro na busca: {response.status_code} - {response.text}")
+            logger.error(f"Erro na busca: {response.status_code}")
             return None
             
         data = response.json()
@@ -92,7 +91,7 @@ def search_contact(phone_number: str):
         if data.get("meta", {}).get("count", 0) > 0:
             for contact in data.get("payload", []):
                 contact_phone = contact.get("phone_number", "")
-                if contact_phone.endswith(search_phone):
+                if contact_phone.endswith(search_phone) or search_phone.endswith(contact_phone.replace('+', '')):
                     logger.info(f"✅ Contato encontrado: ID {contact['id']}")
                     return contact
         
@@ -169,7 +168,7 @@ def find_or_create_conversation(contact_id: int) -> Optional[int]:
             logger.info(f"✅ Conversa criada: ID {new_conv_id}")
             return new_conv_id
         else:
-            logger.error(f"Erro ao criar conversa: {create_response.status_code} - {create_response.text}")
+            logger.error(f"Erro ao criar conversa: {create_response.status_code}")
             return None
         
     except Exception as e:
@@ -231,9 +230,14 @@ async def handle_wuzapi_webhook(request: Request):
         data = await request.json()
         logger.info("📨 Webhook recebido do WuzAPI")
         
-        # Extrair dados
+        # Log dos dados recebidos para debug
+        logger.debug(f"Dados: {json.dumps(data, indent=2)}")
+        
+        # Extrair dados - formato do WuzAPI
         raw_data = data.get("jsonData", data)
         event_type = raw_data.get("type")
+        
+        logger.info(f"Event type: {event_type}")
         
         if event_type != "Message":
             logger.info(f"Ignorando evento: {event_type}")
@@ -248,16 +252,29 @@ async def handle_wuzapi_webhook(request: Request):
             logger.warning("Remetente não encontrado")
             return {"status": "ignored", "reason": "no sender"}
         
-        # Verificar se é grupo
-        chat_jid = info.get("Chat") or info.get("ChatJid") or sender_raw
+        logger.info(f"Sender raw: {sender_raw}")
         
+        # CORREÇÃO: Verificar se é grupo de forma mais precisa
+        chat_jid = info.get('Chat') or info.get('ChatJid') or sender_raw
+        is_group = False
+        
+        # Verifica se é grupo apenas se tiver @g.us
         if "@g.us" in str(chat_jid):
+            is_group = True
+            logger.info(f"Detectado grupo por @g.us: {chat_jid}")
+        
+        # Se for grupo, ignorar
+        if is_group:
             logger.info(f"Ignorando mensagem de grupo")
             return {"status": "ignored", "reason": "group chat"}
         
         # Extrair mensagem
         message_data = event_data.get("Message", event_data)
         message_content = message_data.get("conversation") or message_data.get("body")
+        
+        # Se não encontrou, tenta em extendedTextMessage
+        if not message_content and message_data.get("extendedTextMessage"):
+            message_content = message_data.get("extendedTextMessage", {}).get("text")
         
         if not message_content:
             logger.warning("Mensagem sem conteúdo")
@@ -276,17 +293,21 @@ async def handle_wuzapi_webhook(request: Request):
             logger.error("Falha ao criar contato")
             return {"status": "error", "reason": "contact failed"}
         
+        logger.info(f"Contact ID: {contact_id}")
+        
         conversation_id = find_or_create_conversation(contact_id)
         if not conversation_id:
             logger.error("Falha ao criar conversa")
             return {"status": "error", "reason": "conversation failed"}
         
+        logger.info(f"Conversation ID: {conversation_id}")
+        
         # Enviar mensagem
         result = send_message_to_conversation(conversation_id, message_content)
         
         if result:
-            logger.info(f"✅ Sucesso! Conversa: {conversation_id}")
-            return {"status": "success"}
+            logger.info(f"✅ Sucesso! Mensagem enviada para conversa {conversation_id}")
+            return {"status": "success", "conversation_id": conversation_id}
         else:
             logger.error("❌ Falha ao enviar mensagem")
             return {"status": "error", "reason": "send failed"}
@@ -365,40 +386,50 @@ async def debug_env():
         "wuzapi_token_configured": bool(WUZAPI_API_TOKEN)
     }
 
-@app.post("/test/chatwoot")
-async def test_chatwoot():
-    """Testa conexão com Chatwoot"""
-    results = {}
-    
-    # Testar listagem de contatos
+@app.get("/debug/last_message")
+async def debug_last_message():
+    """Endpoint para debug - mostra a última mensagem recebida"""
+    return {"message": "Use o endpoint /webhook/debug para ver mensagens em tempo real"}
+
+@app.post("/webhook/debug")
+async def debug_webhook(request: Request):
+    """Endpoint de debug que mostra tudo que chega"""
     try:
-        url = f"{CHATWOOT_URL}/api/v1/accounts/{CHATWOOT_ACCOUNT_ID}/contacts"
-        response = requests.get(url, headers=get_chatwoot_headers(), timeout=10)
-        results["contacts_api"] = {
-            "status": response.status_code,
-            "success": response.status_code == 200
-        }
+        body = await request.body()
+        headers = dict(request.headers)
+        
+        print("\n" + "="*60)
+        print("🔍 DEBUG - Webhook Recebido")
+        print(f"Headers: {json.dumps(headers, indent=2)}")
+        print(f"Body: {body.decode('utf-8')}")
+        print("="*60 + "\n")
+        
+        # Tenta parsear como JSON
+        try:
+            json_data = await request.json()
+            print(f"JSON parseado: {json.dumps(json_data, indent=2)}")
+            
+            # Extrair informações importantes
+            raw_data = json_data.get("jsonData", json_data)
+            event_data = raw_data.get("event", {})
+            info = event_data.get("Info", event_data)
+            
+            sender = info.get('SenderAlt') or info.get('Sender')
+            chat = info.get('Chat') or info.get('ChatJid')
+            message = event_data.get("Message", {}).get("conversation") or event_data.get("Message", {}).get("body")
+            
+            print(f"\n📱 Remetente: {sender}")
+            print(f"💬 Chat: {chat}")
+            print(f"📝 Mensagem: {message}")
+            print(f"👥 É grupo? {'SIM' if '@g.us' in str(chat) else 'NÃO'}")
+            
+        except Exception as e:
+            print(f"Erro ao parsear JSON: {e}")
+        
+        return {"status": "received", "message": "Webhook recebido para debug"}
     except Exception as e:
-        results["contacts_api"] = {"error": str(e)}
-    
-    # Testar criar contato
-    try:
-        contact_url = f"{CHATWOOT_URL}/api/v1/accounts/{CHATWOOT_ACCOUNT_ID}/contacts"
-        payload = {
-            "inbox_id": int(CHATWOOT_INBOX_ID),
-            "name": "Teste Integração",
-            "phone_number": "+5511999999999"
-        }
-        response = requests.post(contact_url, headers=get_chatwoot_headers(), json=payload, timeout=10)
-        results["create_contact"] = {
-            "status": response.status_code,
-            "success": response.status_code == 200,
-            "response": response.text[:200] if response.status_code == 200 else response.text
-        }
-    except Exception as e:
-        results["create_contact"] = {"error": str(e)}
-    
-    return results
+        print(f"Erro no debug: {e}")
+        return {"error": str(e)}
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=9000)
