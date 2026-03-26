@@ -9,6 +9,7 @@ from datetime import datetime
 from typing import Optional
 import logging
 import uvicorn
+import base64
 
 # Configuração de logging
 logging.basicConfig(level=logging.INFO)
@@ -60,12 +61,14 @@ logger.info(f"  Account ID: {CHATWOOT_ACCOUNT_ID}")
 logger.info(f"  Inbox ID: {CHATWOOT_INBOX_ID}")
 logger.info(f"  WuzAPI URL: {WUZAPI_API_URL}")
 
-def get_chatwoot_headers() -> dict:
+def get_chatwoot_headers(is_file_upload: bool = False) -> dict:
     """Gera os cabeçalhos para requisições ao Chatwoot."""
-    return {
-        'api_access_token': CHATWOOT_API_TOKEN,
-        'Content-Type': 'application/json'
+    headers = {
+        'api_access_token': CHATWOOT_API_TOKEN
     }
+    if not is_file_upload:
+        headers['Content-Type'] = 'application/json'
+    return headers
 
 # Cria a aplicação FastAPI
 app = FastAPI(title="Ponte Ricard-ZAP", version="1.0.0")
@@ -77,39 +80,208 @@ def extract_phone_number(sender_raw: str) -> str:
     - 553491115553:30@s.whatsapp.net -> 553491115553
     - 553496616325@s.whatsapp.net -> 553496616325
     """
-    # Remove o @s.whatsapp.net ou @g.us
     phone_with_suffix = sender_raw.split('@')[0]
     
-    # Remove sufixos como :30, :1, etc (comum em números comerciais)
-    # Formato: número:sufixo
     if ':' in phone_with_suffix:
         phone_with_suffix = phone_with_suffix.split(':')[0]
     
-    # Remove qualquer caractere não numérico
     clean_phone = re.sub(r'[^0-9]', '', phone_with_suffix)
     
     return clean_phone
 
 def format_phone_for_chatwoot(phone_number: str) -> str:
-    """
-    Formata o número de telefone para o padrão do Chatwoot.
-    Exemplo: 553491115553 -> +553491115553
-    """
-    # Remove qualquer caractere não numérico
+    """Formata o número de telefone para o padrão do Chatwoot."""
     clean = re.sub(r'[^0-9]', '', phone_number)
     
-    # Garante que tem o código do país (55 para Brasil)
     if not clean.startswith('55'):
         clean = f"55{clean}"
     
-    # Adiciona o + na frente
     return f"+{clean}"
+
+def extract_media_message(message_data: dict) -> tuple:
+    """
+    Extrai informações de mídia da mensagem.
+    Retorna (tipo, url, legenda, nome_arquivo)
+    """
+    media_type = None
+    media_url = None
+    caption = None
+    filename = None
+    
+    # Imagem
+    if message_data.get("imageMessage"):
+        media_type = "image"
+        img = message_data.get("imageMessage", {})
+        media_url = img.get("url")
+        caption = img.get("caption", "")
+        filename = "imagem.jpg"
+    
+    # Áudio
+    elif message_data.get("audioMessage"):
+        media_type = "audio"
+        audio = message_data.get("audioMessage", {})
+        media_url = audio.get("url")
+        filename = "audio.ogg"
+    
+    # Vídeo
+    elif message_data.get("videoMessage"):
+        media_type = "video"
+        video = message_data.get("videoMessage", {})
+        media_url = video.get("url")
+        caption = video.get("caption", "")
+        filename = "video.mp4"
+    
+    # Documento
+    elif message_data.get("documentMessage"):
+        media_type = "document"
+        doc = message_data.get("documentMessage", {})
+        media_url = doc.get("url")
+        filename = doc.get("fileName", "documento.pdf")
+        caption = doc.get("caption", "")
+    
+    # Sticker
+    elif message_data.get("stickerMessage"):
+        media_type = "sticker"
+        sticker = message_data.get("stickerMessage", {})
+        media_url = sticker.get("url")
+        filename = "sticker.webp"
+    
+    return media_type, media_url, caption, filename
+
+def download_media_from_wuzapi(media_url: str) -> bytes:
+    """Baixa mídia da WuzAPI usando a URL fornecida."""
+    try:
+        headers = {"token": WUZAPI_API_TOKEN}
+        response = requests.get(media_url, headers=headers, timeout=30)
+        response.raise_for_status()
+        return response.content
+    except Exception as e:
+        logger.error(f"❌ Erro ao baixar mídia: {e}")
+        return None
+
+def upload_media_to_chatwoot(account_id: int, file_content: bytes, filename: str) -> Optional[str]:
+    """Faz upload de mídia para o Chatwoot e retorna a URL."""
+    try:
+        upload_url = f"{CHATWOOT_URL}/api/v1/accounts/{account_id}/contacts/upload"
+        
+        files = {
+            'attachment': (filename, file_content, 'application/octet-stream')
+        }
+        
+        headers = {
+            'api_access_token': CHATWOOT_API_TOKEN
+        }
+        
+        response = requests.post(upload_url, headers=headers, files=files, timeout=30)
+        
+        if response.status_code == 200:
+            data = response.json()
+            media_url = data.get("attachment_url")
+            logger.info(f"✅ Mídia enviada ao Chatwoot: {media_url}")
+            return media_url
+        else:
+            logger.error(f"❌ Erro no upload: {response.status_code} - {response.text}")
+            return None
+            
+    except Exception as e:
+        logger.error(f"❌ Erro ao fazer upload: {e}")
+        return None
+
+def send_media_message_to_chatwoot(conversation_id: int, media_type: str, media_url: str, caption: str = "", filename: str = ""):
+    """Envia uma mensagem com mídia para o Chatwoot."""
+    message_endpoint = f"{CHATWOOT_URL}/api/v1/accounts/{CHATWOOT_ACCOUNT_ID}/conversations/{conversation_id}/messages"
+    
+    # Para Chatwoot, enviamos a URL da mídia no conteúdo
+    if media_type == "image":
+        content = f"![{caption}]({media_url})"
+        if caption:
+            content = f"{caption}\n\n![imagem]({media_url})"
+    elif media_type == "video":
+        content = f"[Vídeo: {filename}]({media_url})"
+        if caption:
+            content = f"{caption}\n\n[Vídeo: {filename}]({media_url})"
+    elif media_type == "audio":
+        content = f"[Áudio: {filename}]({media_url})"
+    elif media_type == "document":
+        content = f"[Documento: {filename}]({media_url})"
+        if caption:
+            content = f"{caption}\n\n[Documento: {filename}]({media_url})"
+    elif media_type == "sticker":
+        content = f"[Sticker]({media_url})"
+    else:
+        content = f"[{media_type.capitalize()} recebida: {filename}]({media_url})"
+    
+    payload = {"content": content, "message_type": "incoming"}
+    
+    try:
+        response = requests.post(message_endpoint, headers=get_chatwoot_headers(), json=payload, timeout=10)
+        
+        if response.status_code == 200:
+            logger.info(f"✅ Mensagem com mídia enviada com sucesso!")
+            return response.json()
+        else:
+            logger.error(f"❌ Falha ao enviar mídia: {response.text}")
+            return None
+            
+    except Exception as e:
+        logger.error(f"❌ Erro ao enviar mensagem com mídia: {e}")
+        return None
+
+def send_message_via_wuzapi(phone_number: str, message: str, media_url: str = None, media_type: str = None):
+    """Envia uma mensagem via WuzAPI, podendo ser texto ou mídia."""
+    if not all([WUZAPI_API_URL, WUZAPI_API_TOKEN]):
+        logger.error("WuzAPI não configurada")
+        return
+
+    headers = {"Content-Type": "application/json", "token": WUZAPI_API_TOKEN}
+    
+    try:
+        # Se for mídia
+        if media_url and media_type:
+            logger.info(f"📤 Enviando mídia via WuzAPI para {phone_number}")
+            
+            # Para envio de mídia, precisamos baixar da URL do Chatwoot e enviar para WuzAPI
+            # Ou usar o endpoint específico da WuzAPI para envio de mídia
+            media_payload = {
+                "number": phone_number,
+                "media": media_url,
+                "caption": message if message else ""
+            }
+            
+            if media_type == "image":
+                send_url = f"{WUZAPI_API_URL}/chat/send/image"
+            elif media_type == "video":
+                send_url = f"{WUZAPI_API_URL}/chat/send/video"
+            elif media_type == "audio":
+                send_url = f"{WUZAPI_API_URL}/chat/send/audio"
+            elif media_type == "document":
+                send_url = f"{WUZAPI_API_URL}/chat/send/document"
+                media_payload["filename"] = "documento.pdf"
+            else:
+                send_url = f"{WUZAPI_API_URL}/chat/send/text"
+                media_payload = {"number": phone_number, "text": message}
+            
+            response = requests.post(send_url, headers=headers, json=media_payload, timeout=30)
+            
+        else:
+            # Mensagem de texto
+            logger.info(f"📤 Enviando texto via WuzAPI para {phone_number}")
+            send_url = f"{WUZAPI_API_URL}/chat/send/text"
+            payload = {"number": phone_number, "text": message}
+            response = requests.post(send_url, headers=headers, json=payload, timeout=15)
+        
+        if response.status_code == 200:
+            logger.info(f"✅ Mensagem enviada com sucesso!")
+        else:
+            logger.error(f"❌ Erro: {response.status_code} - {response.text}")
+            
+    except Exception as e:
+        logger.error(f"❌ Erro: {e}")
 
 # --- FUNÇÕES DE INTERAÇÃO COM O CHATWOOT ---
 
 def search_contact(phone_number: str):
     """Busca um contato no Chatwoot pelo número de telefone."""
-    # Limpa o número para busca
     search_phone = re.sub(r'[^0-9]', '', phone_number)
     search_endpoint = f"{CHATWOOT_URL}/api/v1/accounts/{CHATWOOT_ACCOUNT_ID}/contacts/search"
     params = {'q': search_phone}
@@ -128,7 +300,7 @@ def search_contact(phone_number: str):
             for contact in data.get("payload", []):
                 contact_phone = re.sub(r'[^0-9]', '', contact.get("phone_number", ""))
                 if contact_phone == search_phone or search_phone in contact_phone or contact_phone in search_phone:
-                    logger.info(f"✅ Contato encontrado: ID {contact['id']} - Telefone: {contact.get('phone_number')}")
+                    logger.info(f"✅ Contato encontrado: ID {contact['id']}")
                     return contact
         
         logger.info(f"❌ Contato não encontrado")
@@ -141,7 +313,6 @@ def create_contact(name: str, phone_number: str):
     """Cria um novo contato no Chatwoot."""
     contact_endpoint = f"{CHATWOOT_URL}/api/v1/accounts/{CHATWOOT_ACCOUNT_ID}/contacts"
     
-    # Formata o número corretamente
     formatted_phone = format_phone_for_chatwoot(phone_number)
         
     payload = {
@@ -159,7 +330,7 @@ def create_contact(name: str, phone_number: str):
             return None
             
         contact = response.json()["payload"]["contact"]
-        logger.info(f"✅ Contato criado: ID {contact['id']} - Telefone: {contact.get('phone_number')}")
+        logger.info(f"✅ Contato criado: ID {contact['id']}")
         return contact
     except Exception as e:
         logger.error(f"❌ Erro ao criar contato: {e}")
@@ -167,7 +338,6 @@ def create_contact(name: str, phone_number: str):
 
 def search_or_create_contact(name: str, phone_number: str) -> Optional[int]:
     """Busca um contato e, se não encontrar, cria um novo."""
-    # Extrai o número limpo
     clean_phone = extract_phone_number(phone_number)
     
     contact = search_contact(clean_phone)
@@ -207,7 +377,7 @@ def find_or_create_conversation(contact_id: int) -> Optional[int]:
             logger.info(f"✅ Conversa criada: ID {new_conv_id}")
             return new_conv_id
         else:
-            logger.error(f"Erro ao criar conversa: {create_response.status_code} - {create_response.text}")
+            logger.error(f"Erro ao criar conversa: {create_response.status_code}")
             return None
         
     except Exception as e:
@@ -215,17 +385,12 @@ def find_or_create_conversation(contact_id: int) -> Optional[int]:
         return None
 
 def send_message_to_conversation(conversation_id: int, message_content: str):
-    """Envia uma mensagem para uma conversa específica no Chatwoot."""
+    """Envia uma mensagem de texto para uma conversa específica no Chatwoot."""
     message_endpoint = f"{CHATWOOT_URL}/api/v1/accounts/{CHATWOOT_ACCOUNT_ID}/conversations/{conversation_id}/messages"
     payload = {"content": message_content, "message_type": "incoming"}
     
     try:
-        logger.info(f"📤 Enviando mensagem para conversa {conversation_id}")
-        logger.info(f"   Conteúdo: {message_content[:100]}")
-        
         response = requests.post(message_endpoint, headers=get_chatwoot_headers(), json=payload, timeout=10)
-        
-        logger.info(f"📡 Resposta Chatwoot: Status {response.status_code}")
         
         if response.status_code == 200:
             logger.info(f"✅ Mensagem enviada com sucesso!")
@@ -237,28 +402,6 @@ def send_message_to_conversation(conversation_id: int, message_content: str):
     except Exception as e:
         logger.error(f"❌ Erro ao enviar mensagem: {e}")
         return None
-
-def send_message_via_wuzapi(phone_number: str, message: str):
-    """Envia uma mensagem via WuzAPI."""
-    if not all([WUZAPI_API_URL, WUZAPI_API_TOKEN]):
-        logger.error("WuzAPI não configurada")
-        return
-
-    send_url = f"{WUZAPI_API_URL}/chat/send/text"
-    payload = {"number": phone_number, "text": message}
-    headers = {"Content-Type": "application/json", "token": WUZAPI_API_TOKEN}
-
-    try:
-        logger.info(f"📤 Enviando mensagem via WuzAPI para {phone_number}")
-        response = requests.post(send_url, headers=headers, json=payload, timeout=15)
-        
-        if response.status_code == 200:
-            logger.info(f"✅ Mensagem enviada com sucesso!")
-        else:
-            logger.error(f"❌ Erro: {response.status_code} - {response.text}")
-            
-    except Exception as e:
-        logger.error(f"❌ Erro: {e}")
 
 # --- ENDPOINTS ---
 
@@ -286,33 +429,52 @@ async def handle_wuzapi_webhook(request: Request):
             logger.warning("Remetente não encontrado")
             return {"status": "ignored", "reason": "no sender"}
         
-        logger.info(f"Sender raw: {sender_raw}")
-        
         # Verificar se é mensagem de grupo
         chat_jid = info.get('Chat') or info.get('ChatJid') or sender_raw
         
-        # Se o chat onde a mensagem foi enviada é um grupo, ignorar
         if "@g.us" in str(chat_jid):
             logger.info(f"Ignorando mensagem de grupo")
             return {"status": "ignored", "reason": "group chat"}
         
         # Extrair mensagem
         message_data = event_data.get("Message", event_data)
-        message_content = message_data.get("conversation") or message_data.get("body")
         
-        if not message_content and message_data.get("extendedTextMessage"):
-            message_content = message_data.get("extendedTextMessage", {}).get("text")
+        # Verificar se é mídia
+        media_type, media_url, caption, filename = extract_media_message(message_data)
+        
+        message_content = None
+        
+        if media_type:
+            # É uma mensagem com mídia
+            logger.info(f"📷 Mídia recebida: {media_type}")
+            message_content = caption or f"[{media_type.upper()}]"
+            
+            # Baixar mídia da WuzAPI
+            file_content = download_media_from_wuzapi(media_url)
+            
+            if file_content:
+                # Upload para o Chatwoot
+                uploaded_url = upload_media_to_chatwoot(int(CHATWOOT_ACCOUNT_ID), file_content, filename)
+                
+                if uploaded_url:
+                    media_url = uploaded_url
+        else:
+            # Mensagem de texto
+            message_content = message_data.get("conversation") or message_data.get("body")
+            
+            if not message_content and message_data.get("extendedTextMessage"):
+                message_content = message_data.get("extendedTextMessage", {}).get("text")
         
         if not message_content:
             logger.warning("Mensagem sem conteúdo")
             return {"status": "ignored", "reason": "empty content"}
         
-        # Extrair número do telefone corretamente
+        # Dados do contato
         sender_phone = extract_phone_number(sender_raw)
         sender_name = info.get("PushName") or info.get("pushName") or sender_phone
         
         logger.info(f"Processando: {sender_name} ({sender_phone})")
-        logger.info(f"Mensagem: {message_content}")
+        logger.info(f"Mensagem: {message_content[:100]}")
         
         # Criar contato e conversa
         contact_id = search_or_create_contact(sender_name, sender_phone)
@@ -320,17 +482,16 @@ async def handle_wuzapi_webhook(request: Request):
             logger.error("Falha ao criar contato")
             return {"status": "error", "reason": "contact failed"}
         
-        logger.info(f"Contact ID: {contact_id}")
-        
         conversation_id = find_or_create_conversation(contact_id)
         if not conversation_id:
             logger.error("Falha ao criar conversa")
             return {"status": "error", "reason": "conversation failed"}
         
-        logger.info(f"Conversation ID: {conversation_id}")
-        
-        # Enviar mensagem
-        result = send_message_to_conversation(conversation_id, message_content)
+        # Enviar mensagem (texto ou mídia)
+        if media_type and media_url:
+            result = send_media_message_to_chatwoot(conversation_id, media_type, media_url, message_content, filename)
+        else:
+            result = send_message_to_conversation(conversation_id, message_content)
         
         if result:
             logger.info(f"✅ Sucesso! Mensagem enviada para conversa {conversation_id}")
@@ -345,27 +506,37 @@ async def handle_wuzapi_webhook(request: Request):
 
 @app.post("/webhook/chatwoot")
 async def handle_chatwoot_webhook(request: Request):
-    """Recebe webhooks do Chatwoot."""
+    """Recebe webhooks do Chatwoot e envia para o WhatsApp."""
     try:
         data = await request.json()
         logger.info("📨 Webhook recebido do Chatwoot")
+        logger.debug(json.dumps(data, indent=2))
         
         # Validar evento
         if data.get("event") != "message_created":
             return {"status": "ignored", "reason": "not message_created"}
         
-        # Validar tipo
-        if data.get("message_type") != "outgoing":
-            return {"status": "ignored", "reason": "not outgoing"}
+        # Validar tipo - ACEITAR outgoing E incoming
+        message_type = data.get("message_type")
         
-        # Validar remetente
-        sender_type = data.get("sender", {}).get("type")
-        if sender_type not in ["agent_bot", "user"]:
-            return {"status": "ignored", "reason": "not agent"}
+        # Ignorar apenas se for mensagem do sistema ou privada
+        if data.get("private"):
+            return {"status": "ignored", "reason": "private message"}
         
+        # Pegar conteúdo
         content = data.get("content")
         if not content:
-            return {"status": "ignored", "reason": "empty content"}
+            # Verificar se tem anexo
+            attachments = data.get("attachments", [])
+            if attachments:
+                content = f"[Anexo: {attachments[0].get('file_name', 'arquivo')}]"
+                media_url = attachments[0].get("data_url") or attachments[0].get("url")
+                media_type = attachments[0].get("file_type", "document").split('/')[0]
+            else:
+                return {"status": "ignored", "reason": "empty content"}
+        else:
+            media_url = None
+            media_type = None
         
         # Buscar número do contato
         conversation = data.get("conversation", {})
@@ -378,11 +549,16 @@ async def handle_chatwoot_webhook(request: Request):
             logger.error("Telefone não encontrado")
             return {"status": "error", "reason": "phone not found"}
         
-        # Limpar número para envio (apenas números)
+        # Limpar número para envio
         destination = re.sub(r'\D', '', contact_phone)
         
-        # Enviar mensagem
-        send_message_via_wuzapi(destination, content)
+        logger.info(f"Enviando resposta para {destination}: {content[:100]}")
+        
+        # Enviar mensagem via WuzAPI
+        if media_url and media_type:
+            send_message_via_wuzapi(destination, content, media_url, media_type)
+        else:
+            send_message_via_wuzapi(destination, content)
         
         return {"status": "success"}
         
@@ -412,25 +588,6 @@ async def debug_env():
         "chatwoot_token_configured": bool(CHATWOOT_API_TOKEN),
         "wuzapi_token_configured": bool(WUZAPI_API_TOKEN)
     }
-
-@app.post("/test/chatwoot")
-async def test_chatwoot():
-    """Testa conexão com Chatwoot"""
-    results = {}
-    
-    # Testar listagem de contatos
-    try:
-        url = f"{CHATWOOT_URL}/api/v1/accounts/{CHATWOOT_ACCOUNT_ID}/contacts"
-        response = requests.get(url, headers=get_chatwoot_headers(), timeout=10)
-        results["contacts_api"] = {
-            "status": response.status_code,
-            "success": response.status_code == 200,
-            "response": response.text[:200]
-        }
-    except Exception as e:
-        results["contacts_api"] = {"error": str(e)}
-    
-    return results
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=9000)
