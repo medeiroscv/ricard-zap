@@ -9,7 +9,6 @@ from datetime import datetime
 from typing import Optional, Dict, Any, Tuple
 import logging
 import uvicorn
-import base64
 import mimetypes
 
 # Configuração de logging
@@ -224,16 +223,15 @@ def extract_media_message(message_data: dict) -> Tuple[Optional[str], Optional[s
         media_url = img.get("url")
         caption = img.get("caption", "")
         filename = "imagem.jpg"
-        logger.info(f"📷 Imagem detectada: {media_url}")
+        logger.info(f"📷 Imagem detectada")
     
     # Áudio
     elif message_data.get("audioMessage"):
         media_type = "audio"
         audio = message_data.get("audioMessage", {})
         media_url = audio.get("url")
-        caption = audio.get("caption", "")
         filename = "audio.ogg"
-        logger.info(f"🎵 Áudio detectado: {media_url}")
+        logger.info(f"🎵 Áudio detectado")
     
     # Vídeo
     elif message_data.get("videoMessage"):
@@ -242,7 +240,7 @@ def extract_media_message(message_data: dict) -> Tuple[Optional[str], Optional[s
         media_url = video.get("url")
         caption = video.get("caption", "")
         filename = "video.mp4"
-        logger.info(f"🎬 Vídeo detectado: {media_url}")
+        logger.info(f"🎬 Vídeo detectado")
     
     # Documento
     elif message_data.get("documentMessage"):
@@ -267,7 +265,7 @@ def download_media_from_wuzapi(media_url: str) -> Optional[bytes]:
     """Baixa mídia da WuzAPI usando a URL fornecida."""
     try:
         headers = {"token": WUZAPI_API_TOKEN}
-        logger.info(f"📥 Baixando mídia de: {media_url}")
+        logger.info(f"📥 Baixando mídia...")
         response = requests.get(media_url, headers=headers, timeout=30)
         response.raise_for_status()
         logger.info(f"✅ Mídia baixada: {len(response.content)} bytes")
@@ -300,10 +298,10 @@ def upload_media_to_chatwoot(account_id: int, file_content: bytes, filename: str
         if response.status_code == 200:
             data = response.json()
             media_url = data.get("attachment_url")
-            logger.info(f"✅ Mídia enviada ao Chatwoot: {media_url}")
+            logger.info(f"✅ Mídia enviada ao Chatwoot")
             return media_url
         else:
-            logger.error(f"❌ Erro no upload: {response.status_code} - {response.text}")
+            logger.error(f"❌ Erro no upload: {response.status_code}")
             return None
             
     except Exception as e:
@@ -340,10 +338,10 @@ def send_media_message_to_chatwoot(conversation_id: int, media_type: str, media_
         response = requests.post(message_endpoint, headers=get_chatwoot_headers(), json=payload, timeout=10)
         
         if response.status_code == 200:
-            logger.info(f"✅ Mensagem com mídia enviada para conversa {conversation_id}")
+            logger.info(f"✅ Mensagem com mídia enviada")
             return response.json()
         else:
-            logger.error(f"❌ Falha ao enviar mídia: {response.status_code} - {response.text}")
+            logger.error(f"❌ Falha ao enviar mídia: {response.status_code}")
             return None
             
     except Exception as e:
@@ -363,8 +361,6 @@ def send_media_via_wuzapi(phone_number: str, media_url: str, media_type: str, ca
         
         logger.info(f"📤 Enviando mídia via WuzAPI para: {destination}")
         logger.info(f"   Tipo: {media_type}")
-        logger.info(f"   URL: {media_url}")
-        logger.info(f"   Legenda: {caption[:50] if caption else ''}")
         
         payload = {
             "number": destination,
@@ -392,7 +388,7 @@ def send_media_via_wuzapi(phone_number: str, media_url: str, media_type: str, ca
             logger.info(f"✅ Mídia enviada com sucesso!")
             return True
         else:
-            logger.error(f"❌ Erro: {response.status_code} - {response.text}")
+            logger.error(f"❌ Erro: {response.status_code}")
             return False
             
     except Exception as e:
@@ -466,7 +462,6 @@ def create_whatsapp_contact(name: str, phone_number: str, jid: str, lid: Optiona
     try:
         logger.info(f"📝 Criando contato: {name}")
         logger.info(f"   JID: {jid}")
-        logger.info(f"   LID: {lid}")
         
         response = requests.post(contact_endpoint, headers=get_chatwoot_headers(), json=payload, timeout=10)
         
@@ -475,7 +470,7 @@ def create_whatsapp_contact(name: str, phone_number: str, jid: str, lid: Optiona
             logger.info(f"✅ Contato criado: ID {contact['id']}")
             return contact
         else:
-            logger.error(f"❌ Erro ao criar: {response.status_code} - {response.text}")
+            logger.error(f"❌ Erro ao criar: {response.status_code}")
             return None
             
     except Exception as e:
@@ -514,7 +509,7 @@ def update_whatsapp_contact(contact_id: int, name: str, phone_number: str, jid: 
             logger.info(f"✅ Contato atualizado: ID {contact_id}")
             return True
         else:
-            logger.error(f"❌ Erro ao atualizar: {response.status_code} - {response.text}")
+            logger.error(f"❌ Erro ao atualizar: {response.status_code}")
             return False
             
     except Exception as e:
@@ -596,7 +591,7 @@ def send_message_to_conversation(conversation_id: int, message_content: str):
             logger.info(f"✅ Mensagem enviada para conversa {conversation_id}")
             return response.json()
         else:
-            logger.error(f"❌ Falha: {response.status_code} - {response.text}")
+            logger.error(f"❌ Falha: {response.status_code}")
             return None
     except Exception as e:
         logger.error(f"❌ Erro: {e}")
@@ -627,31 +622,25 @@ def send_message_via_wuzapi(phone_number: str, message: str, media_url: str = No
             {"number": destination, "text": message},
             {"phone": destination, "text": message},
             {"to": destination, "text": message},
-            {"jid": f"{destination}@s.whatsapp.net", "text": message},
             {"number": destination, "body": message},
             {"phone": destination, "body": message}
         ]
         
         response = None
-        successful_payload = None
         
-        for idx, payload in enumerate(payloads_to_try, 1):
+        for payload in payloads_to_try:
             try:
-                logger.debug(f"   Tentativa {idx}: {json.dumps(payload)}")
                 response = requests.post(send_url, headers=headers, json=payload, timeout=15)
-                
                 if response.status_code == 200:
-                    successful_payload = payload
                     break
-            except Exception as e:
-                logger.debug(f"   Erro na tentativa {idx}: {e}")
+            except Exception:
                 continue
         
         if response and response.status_code == 200:
             logger.info(f"✅ Texto enviado com sucesso!")
             return True
         else:
-            logger.error(f"❌ Falha ao enviar. Status: {response.status_code if response else 'No response'}")
+            logger.error(f"❌ Falha ao enviar texto")
             return False
             
     except Exception as e:
@@ -663,10 +652,7 @@ def send_message_via_wuzapi(phone_number: str, message: str, media_url: str = No
 # ============================================================
 
 def extract_destination_from_chatwoot_webhook(data: dict) -> Optional[str]:
-    """
-    Extrai o destinatário (JID para envio) do webhook do Chatwoot.
-    Busca em múltiplos locais da estrutura do webhook.
-    """
+    """Extrai o destinatário do webhook do Chatwoot."""
     conversation = data.get("conversation", {})
     meta = conversation.get("meta", {})
     sender_meta = meta.get("sender", {})
@@ -695,7 +681,6 @@ def extract_destination_from_chatwoot_webhook(data: dict) -> Optional[str]:
     
     conversation_id = conversation.get("id") or data.get("conversation_id")
     if conversation_id:
-        logger.info(f"🔄 Buscando detalhes da conversa {conversation_id}")
         conv_detail_url = f"{CHATWOOT_URL}/api/v1/accounts/{CHATWOOT_ACCOUNT_ID}/conversations/{conversation_id}"
         try:
             conv_response = requests.get(conv_detail_url, headers=get_chatwoot_headers(), timeout=10)
@@ -710,8 +695,8 @@ def extract_destination_from_chatwoot_webhook(data: dict) -> Optional[str]:
                     return conv_custom.get("whatsapp_lid")
                 if conv_contact.get("phone_number"):
                     return conv_contact.get("phone_number")
-        except Exception as e:
-            logger.error(f"Erro ao buscar conversa: {e}")
+        except Exception:
+            pass
     
     return None
 
@@ -842,12 +827,11 @@ async def handle_chatwoot_webhook(request: Request):
             for att in attachments:
                 media_url = att.get("data_url") or att.get("url")
                 media_type = att.get("file_type", "document").split('/')[0]
-                filename = att.get("file_name", "arquivo")
                 caption = content or ""
                 
-                logger.info(f"📎 Anexo detectado: {media_type} - {filename}")
+                logger.info(f"📎 Anexo detectado: {media_type}")
                 success = send_media_via_wuzapi(destination, media_url, media_type, caption)
-                break  # Envia apenas o primeiro anexo por enquanto
+                break
         else:
             # Mensagem de texto
             success = send_message_via_wuzapi(destination, content)
@@ -857,4 +841,43 @@ async def handle_chatwoot_webhook(request: Request):
             return {"status": "success"}
         else:
             logger.error("❌ Falha ao enviar mensagem")
-            return {"status": "error", "reason": "
+            return {"status": "error", "reason": "send failed"}
+        
+    except Exception as e:
+        logger.error(f"❌ Erro: {e}", exc_info=True)
+        return {"status": "error", "detail": str(e)}
+
+# ============================================================
+# ENDPOINTS DE DIAGNÓSTICO
+# ============================================================
+
+@app.get("/")
+async def root():
+    return {
+        "status": "online",
+        "service": "Ponte Ricard-ZAP",
+        "version": "1.0.0"
+    }
+
+@app.get("/health")
+async def health():
+    return {"status": "healthy"}
+
+@app.get("/debug/env")
+async def debug_env():
+    return {
+        "chatwoot_url": CHATWOOT_URL,
+        "chatwoot_account_id": CHATWOOT_ACCOUNT_ID,
+        "chatwoot_inbox_id": CHATWOOT_INBOX_ID,
+        "wuzapi_url": WUZAPI_API_URL,
+        "wuzapi_instance": WUZAPI_INSTANCE_NAME,
+        "chatwoot_token_configured": bool(CHATWOOT_API_TOKEN),
+        "wuzapi_token_configured": bool(WUZAPI_API_TOKEN)
+    }
+
+@app.get("/debug/contacts")
+async def debug_contacts():
+    """Lista os últimos contatos criados"""
+    try:
+        url = f"{CHATWOOT_URL}/api/v1/accounts/{CHATWOOT_ACCOUNT_ID}/contacts"
+        params = {"sort":
