@@ -10,6 +10,7 @@ from typing import Optional, Dict, Any, Tuple
 import logging
 import uvicorn
 import mimetypes
+import base64
 
 # Configuração de logging
 logging.basicConfig(level=logging.INFO)
@@ -193,38 +194,38 @@ def clean_number_for_wuzapi(phone_number: str) -> str:
     return clean
 
 # ============================================================
-# FUNÇÕES PARA MÍDIAS - CORRIGIDAS COM URL COMPLETA
+# FUNÇÕES PARA MÍDIAS - CORRIGIDAS COM ENDPOINT CORRETO
 # ============================================================
 
-def build_full_media_url(media_path: str) -> str:
-    """
-    Constrói URL completa a partir de um caminho relativo.
-    Se a URL já for completa, retorna ela mesma.
-    """
-    if not media_path:
+def extract_media_id_from_url(url: str) -> Optional[str]:
+    """Extrai o ID da mídia da URL."""
+    if not url:
         return None
     
-    # Se já começa com http:// ou https://, é URL completa
-    if media_path.startswith('http://') or media_path.startswith('https://'):
-        return media_path
+    # Tenta extrair ID de diferentes formatos de URL
+    # Formato: /o1/v/t24/f2/m238/AQPKMxP6V4DvS0GmOqm5... -> ID é AQPKMxP6V4DvS0GmOqm5...
+    match = re.search(r'/m([^/?]+)', url)
+    if match:
+        return match.group(1)
     
-    # Se começa com /, é caminho relativo ao domínio da WuzAPI
-    if media_path.startswith('/'):
-        return f"{WUZAPI_API_URL}{media_path}"
+    # Tenta pegar o último segmento
+    parts = url.split('/')
+    for part in reversed(parts):
+        if part and len(part) > 10:
+            return part.split('?')[0]
     
-    # Caso contrário, tenta construir com o domínio
-    return f"{WUZAPI_API_URL}/{media_path}"
+    return None
 
 def extract_media_message(message_data: dict) -> Tuple[Optional[str], Optional[str], Optional[str], Optional[str]]:
     """
     Extrai informações de mídia da mensagem do WuzAPI.
-    Busca em diferentes estruturas possíveis.
     Retorna: (media_type, media_url, caption, filename)
     """
     media_type = None
     media_url = None
     caption = None
     filename = None
+    media_id = None
     
     # Tenta diferentes estruturas possíveis
     media_message = None
@@ -276,27 +277,24 @@ def extract_media_message(message_data: dict) -> Tuple[Optional[str], Optional[s
             filename = "sticker.webp"
     
     if media_message:
-        # Extrai URL de diferentes campos possíveis
+        # Extrai URL
         media_url = media_message.get("url") or media_message.get("directPath") or media_message.get("mediaUrl")
         
-        # Se a URL for relativa, constrói a URL completa
-        if media_url:
-            original_url = media_url
-            media_url = build_full_media_url(media_url)
-            if original_url != media_url:
-                logger.info(f"   URL convertida: {original_url} -> {media_url}")
+        # Extrai ID da mídia
+        media_id = media_message.get("id") or media_message.get("mediaKey")
+        if not media_id and media_url:
+            media_id = extract_media_id_from_url(media_url)
+        
+        # Constrói URL usando o endpoint correto da WuzAPI
+        if media_id:
+            media_url = f"{WUZAPI_API_URL}/media/get/{media_id}"
+            logger.info(f"🔗 URL construída com endpoint /media/get/{media_id}")
         
         # Extrai legenda
         caption = media_message.get("caption") or media_message.get("text") or ""
         
-        # Se ainda não tem URL, tenta pegar o ID para construir
-        if not media_url:
-            media_id = media_message.get("id") or media_message.get("mediaKey")
-            if media_id:
-                media_url = f"{WUZAPI_API_URL}/media/get/{media_id}"
-                logger.info(f"🔗 URL construída a partir do ID: {media_url}")
-        
         logger.info(f"📷 Mídia detectada: {media_type}")
+        logger.info(f"   ID: {media_id}")
         logger.info(f"   URL: {media_url}")
         logger.info(f"   Legenda: {caption[:50] if caption else 'sem legenda'}")
         
@@ -305,7 +303,7 @@ def extract_media_message(message_data: dict) -> Tuple[Optional[str], Optional[s
     return None, None, None, None
 
 def download_media_from_wuzapi(media_url: str) -> Optional[bytes]:
-    """Baixa mídia da WuzAPI usando a URL fornecida."""
+    """Baixa mídia da WuzAPI usando o endpoint correto."""
     if not media_url:
         logger.error("URL da mídia vazia")
         return None
@@ -314,9 +312,13 @@ def download_media_from_wuzapi(media_url: str) -> Optional[bytes]:
         headers = {"token": WUZAPI_API_TOKEN}
         logger.info(f"📥 Baixando mídia de: {media_url}")
         response = requests.get(media_url, headers=headers, timeout=30)
-        response.raise_for_status()
-        logger.info(f"✅ Mídia baixada: {len(response.content)} bytes")
-        return response.content
+        
+        if response.status_code == 200:
+            logger.info(f"✅ Mídia baixada: {len(response.content)} bytes")
+            return response.content
+        else:
+            logger.error(f"❌ Erro ao baixar: {response.status_code} - {response.text[:200]}")
+            return None
     except Exception as e:
         logger.error(f"❌ Erro ao baixar mídia: {e}")
         return None
@@ -389,7 +391,7 @@ def send_media_message_to_chatwoot(conversation_id: int, media_type: str, media_
             logger.info(f"✅ Mensagem com mídia enviada")
             return response.json()
         else:
-            logger.error(f"❌ Falha ao enviar mídia: {response.status_code} - {response.text}")
+            logger.error(f"❌ Falha ao enviar mídia: {response.status_code}")
             return None
             
     except Exception as e:
@@ -941,16 +943,6 @@ async def debug_contacts():
                 })
             return {"contacts": result}
         return {"error": f"Status {response.status_code}"}
-    except Exception as e:
-        return {"error": str(e)}
-
-@app.post("/debug/webhook")
-async def debug_webhook(request: Request):
-    """Endpoint para debug do webhook"""
-    try:
-        body = await request.body()
-        logger.info(f"🔍 Debug webhook - Body: {body.decode('utf-8')[:2000]}")
-        return {"status": "received", "body": body.decode('utf-8')[:500]}
     except Exception as e:
         return {"error": str(e)}
 
