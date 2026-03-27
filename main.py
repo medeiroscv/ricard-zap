@@ -183,11 +183,6 @@ def clean_number_for_wuzapi(phone_number: str) -> str:
     """
     Limpa o número de telefone para envio via WuzAPI.
     Remove sufixos como :30 e mantém apenas números.
-    
-    Exemplos:
-    - 553491115553:30@s.whatsapp.net -> 553491115553
-    - 55349111555330 -> 553491115553 (remove sufixo de 2 dígitos no final)
-    - 553491115553 -> 553491115553
     """
     if not phone_number:
         return ""
@@ -200,8 +195,6 @@ def clean_number_for_wuzapi(phone_number: str) -> str:
     clean = re.sub(r'[^0-9]', '', phone_number)
     
     # Verifica se tem sufixo de 2 dígitos (como :30) que ficou grudado
-    # Exemplo: 55349111555330 -> deve ser 553491115553
-    # O número brasileiro tem 13 dígitos (55 + 11 + 9 dígitos)
     if len(clean) == 15 and clean.endswith('30'):
         clean = clean[:-2]
         logger.info(f"   Removido sufixo '30' do número: {clean}")
@@ -287,7 +280,7 @@ def create_whatsapp_contact(name: str, phone_number: str, jid: str, lid: Optiona
             logger.info(f"✅ Contato criado: ID {contact['id']}")
             return contact
         else:
-            logger.error(f"❌ Erro ao criar: {response.status_code}")
+            logger.error(f"❌ Erro ao criar: {response.status_code} - {response.text}")
             return None
             
     except Exception as e:
@@ -326,7 +319,7 @@ def update_whatsapp_contact(contact_id: int, name: str, phone_number: str, jid: 
             logger.info(f"✅ Contato atualizado: ID {contact_id}")
             return True
         else:
-            logger.error(f"❌ Erro ao atualizar: {response.status_code}")
+            logger.error(f"❌ Erro ao atualizar: {response.status_code} - {response.text}")
             return False
             
     except Exception as e:
@@ -408,14 +401,14 @@ def send_message_to_conversation(conversation_id: int, message_content: str):
             logger.info(f"✅ Mensagem enviada para conversa {conversation_id}")
             return response.json()
         else:
-            logger.error(f"❌ Falha: {response.status_code}")
+            logger.error(f"❌ Falha: {response.status_code} - {response.text}")
             return None
     except Exception as e:
         logger.error(f"❌ Erro: {e}")
         return None
 
 def send_message_via_wuzapi(phone_number: str, message: str, media_url: str = None, media_type: str = None):
-    """Envia mensagem via WuzAPI."""
+    """Envia mensagem via WuzAPI com múltiplas tentativas de formato."""
     if not all([WUZAPI_API_URL, WUZAPI_API_TOKEN]):
         logger.error("WuzAPI não configurada")
         return False
@@ -423,38 +416,54 @@ def send_message_via_wuzapi(phone_number: str, message: str, media_url: str = No
     headers = {"Content-Type": "application/json", "token": WUZAPI_API_TOKEN}
     
     try:
-        # Limpa o número corretamente para envio
+        # Limpa o número
         if is_lid_identifier(phone_number):
             destination = phone_number
         else:
-            # Extrai apenas números, removendo sufixos como :30
             destination = clean_number_for_wuzapi(phone_number)
         
         logger.info(f"📤 Enviando para: {destination}")
         logger.info(f"   Mensagem: {message[:100] if message else '[Mídia]'}")
         
-        if media_url and media_type:
-            media_payload = {"number": destination, "media": media_url, "caption": message or ""}
-            
-            endpoints = {
-                "image": f"{WUZAPI_API_URL}/chat/send/image",
-                "video": f"{WUZAPI_API_URL}/chat/send/video",
-                "audio": f"{WUZAPI_API_URL}/chat/send/audio",
-                "document": f"{WUZAPI_API_URL}/chat/send/document"
-            }
-            
-            send_url = endpoints.get(media_type, f"{WUZAPI_API_URL}/chat/send/text")
-            response = requests.post(send_url, headers=headers, json=media_payload, timeout=30)
-        else:
-            send_url = f"{WUZAPI_API_URL}/chat/send/text"
-            payload = {"number": destination, "text": message}
-            response = requests.post(send_url, headers=headers, json=payload, timeout=15)
+        send_url = f"{WUZAPI_API_URL}/chat/send/text"
         
-        if response.status_code == 200:
-            logger.info(f"✅ Mensagem enviada com sucesso!")
+        # Diferentes formatos de payload para tentar
+        payloads_to_try = [
+            {"number": destination, "text": message},
+            {"phone": destination, "text": message},
+            {"to": destination, "text": message},
+            {"jid": f"{destination}@s.whatsapp.net", "text": message},
+            {"number": destination, "body": message},
+            {"phone": destination, "body": message}
+        ]
+        
+        response = None
+        successful_payload = None
+        
+        for idx, payload in enumerate(payloads_to_try, 1):
+            try:
+                logger.info(f"   Tentativa {idx}: {json.dumps(payload)}")
+                response = requests.post(send_url, headers=headers, json=payload, timeout=15)
+                logger.info(f"   Resposta: {response.status_code}")
+                
+                if response.status_code == 200:
+                    successful_payload = payload
+                    break
+                elif response.status_code == 400:
+                    # Continua tentando outros formatos
+                    continue
+                else:
+                    # Outro erro, para de tentar
+                    break
+            except Exception as e:
+                logger.error(f"   Erro na tentativa {idx}: {e}")
+                continue
+        
+        if response and response.status_code == 200:
+            logger.info(f"✅ Mensagem enviada com sucesso! Formato usado: {json.dumps(successful_payload)}")
             return True
         else:
-            logger.error(f"❌ Erro: {response.status_code} - {response.text}")
+            logger.error(f"❌ Falha ao enviar. Última resposta: {response.status_code if response else 'No response'} - {response.text if response else 'Unknown'}")
             return False
             
     except Exception as e:
@@ -470,7 +479,7 @@ def extract_destination_from_chatwoot_webhook(data: dict) -> Optional[str]:
     Extrai o destinatário (JID para envio) do webhook do Chatwoot.
     Busca em múltiplos locais da estrutura do webhook.
     """
-    # 1. Buscar no meta.sender.custom_attributes (local onde os dados estão no log)
+    # 1. Buscar no meta.sender.custom_attributes
     conversation = data.get("conversation", {})
     meta = conversation.get("meta", {})
     sender_meta = meta.get("sender", {})
@@ -698,6 +707,45 @@ async def debug_env():
         "chatwoot_token_configured": bool(CHATWOOT_API_TOKEN),
         "wuzapi_token_configured": bool(WUZAPI_API_TOKEN)
     }
+
+@app.get("/debug/contacts")
+async def debug_contacts():
+    """Lista os últimos contatos criados"""
+    try:
+        url = f"{CHATWOOT_URL}/api/v1/accounts/{CHATWOOT_ACCOUNT_ID}/contacts"
+        params = {"sort": "-created_at", "limit": 10}
+        response = requests.get(url, headers=get_chatwoot_headers(), params=params, timeout=10)
+        
+        if response.status_code == 200:
+            contacts = response.json().get("payload", [])
+            result = []
+            for c in contacts[:5]:
+                result.append({
+                    "id": c.get("id"),
+                    "name": c.get("name"),
+                    "phone": c.get("phone_number"),
+                    "custom": c.get("custom_attributes", {})
+                })
+            return {"contacts": result}
+        return {"error": f"Status {response.status_code}"}
+    except Exception as e:
+        return {"error": str(e)}
+
+@app.post("/test/wuzapi")
+async def test_wuzapi(request: Request):
+    """Endpoint para testar diretamente a WuzAPI"""
+    try:
+        body = await request.json()
+        destination = body.get("number")
+        message = body.get("message")
+        
+        if not destination or not message:
+            return {"error": "Missing number or message"}
+        
+        success = send_message_via_wuzapi(destination, message)
+        return {"success": success}
+    except Exception as e:
+        return {"error": str(e)}
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=9000)
