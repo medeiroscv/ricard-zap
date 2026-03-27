@@ -6,7 +6,7 @@ import json
 from dotenv import load_dotenv
 import re
 from datetime import datetime
-from typing import Optional
+from typing import Optional, Dict, Any
 import logging
 import uvicorn
 import base64
@@ -72,6 +72,9 @@ def get_chatwoot_headers(is_file_upload: bool = False) -> dict:
 
 # Cria a aplicação FastAPI
 app = FastAPI(title="Ponte Ricard-ZAP", version="1.0.0")
+
+# Cache para armazenar conversas ativas
+conversation_cache: Dict[str, int] = {}
 
 def extract_phone_number(sender_raw: str) -> str:
     """
@@ -240,8 +243,6 @@ def send_message_via_wuzapi(phone_number: str, message: str, media_url: str = No
         if media_url and media_type:
             logger.info(f"📤 Enviando mídia via WuzAPI para {phone_number}")
             
-            # Para envio de mídia, precisamos baixar da URL do Chatwoot e enviar para WuzAPI
-            # Ou usar o endpoint específico da WuzAPI para envio de mídia
             media_payload = {
                 "number": phone_number,
                 "media": media_url,
@@ -361,12 +362,22 @@ def find_or_create_conversation(contact_id: int) -> Optional[int]:
         
         if response.status_code == 200:
             conversations = response.json().get("payload", [])
-            if conversations:
+            
+            # IMPORTANTE: Filtrar apenas conversas abertas ou pendentes
+            active_conversations = [c for c in conversations if c.get("status") in ["open", "pending"]]
+            
+            if active_conversations:
+                # Pega a conversa mais recente
+                conv_id = active_conversations[0]['id']
+                logger.info(f"✅ Conversa ativa encontrada: ID {conv_id} (Status: {active_conversations[0].get('status')})")
+                return conv_id
+            elif conversations:
+                # Se não tiver ativa, pega a mais recente
                 conv_id = conversations[0]['id']
-                logger.info(f"✅ Conversa encontrada: ID {conv_id}")
+                logger.info(f"✅ Conversa encontrada (inativa): ID {conv_id}")
                 return conv_id
         
-        logger.info(f"🆕 Criando nova conversa")
+        logger.info(f"🆕 Criando nova conversa para contato {contact_id}")
         create_conv_endpoint = f"{CHATWOOT_URL}/api/v1/accounts/{CHATWOOT_ACCOUNT_ID}/conversations"
         payload = {"inbox_id": int(CHATWOOT_INBOX_ID), "contact_id": contact_id}
         
@@ -377,7 +388,7 @@ def find_or_create_conversation(contact_id: int) -> Optional[int]:
             logger.info(f"✅ Conversa criada: ID {new_conv_id}")
             return new_conv_id
         else:
-            logger.error(f"Erro ao criar conversa: {create_response.status_code}")
+            logger.error(f"Erro ao criar conversa: {create_response.status_code} - {create_response.text}")
             return None
         
     except Exception as e:
@@ -390,13 +401,14 @@ def send_message_to_conversation(conversation_id: int, message_content: str):
     payload = {"content": message_content, "message_type": "incoming"}
     
     try:
+        logger.info(f"📤 Enviando mensagem para conversa {conversation_id}")
         response = requests.post(message_endpoint, headers=get_chatwoot_headers(), json=payload, timeout=10)
         
         if response.status_code == 200:
             logger.info(f"✅ Mensagem enviada com sucesso!")
             return response.json()
         else:
-            logger.error(f"❌ Falha ao enviar: {response.text}")
+            logger.error(f"❌ Falha ao enviar: {response.status_code} - {response.text}")
             return None
             
     except Exception as e:
@@ -476,16 +488,21 @@ async def handle_wuzapi_webhook(request: Request):
         logger.info(f"Processando: {sender_name} ({sender_phone})")
         logger.info(f"Mensagem: {message_content[:100]}")
         
-        # Criar contato e conversa
+        # Criar contato (ou buscar existente)
         contact_id = search_or_create_contact(sender_name, sender_phone)
         if not contact_id:
             logger.error("Falha ao criar contato")
             return {"status": "error", "reason": "contact failed"}
         
+        logger.info(f"Contact ID: {contact_id}")
+        
+        # Buscar conversa existente (ativa) ou criar nova
         conversation_id = find_or_create_conversation(contact_id)
         if not conversation_id:
             logger.error("Falha ao criar conversa")
             return {"status": "error", "reason": "conversation failed"}
+        
+        logger.info(f"Conversation ID: {conversation_id}")
         
         # Enviar mensagem (texto ou mídia)
         if media_type and media_url:
@@ -513,53 +530,75 @@ async def handle_chatwoot_webhook(request: Request):
         logger.debug(json.dumps(data, indent=2))
         
         # Validar evento
-        if data.get("event") != "message_created":
-            return {"status": "ignored", "reason": "not message_created"}
+        event = data.get("event")
+        if event != "message_created":
+            logger.info(f"Ignorando evento: {event}")
+            return {"status": "ignored", "reason": f"event is {event}"}
         
-        # Validar tipo - ACEITAR outgoing E incoming
-        message_type = data.get("message_type")
-        
-        # Ignorar apenas se for mensagem do sistema ou privada
+        # Verificar se é mensagem do sistema
         if data.get("private"):
+            logger.info("Ignorando mensagem privada")
             return {"status": "ignored", "reason": "private message"}
         
         # Pegar conteúdo
         content = data.get("content")
-        if not content:
-            # Verificar se tem anexo
-            attachments = data.get("attachments", [])
-            if attachments:
-                content = f"[Anexo: {attachments[0].get('file_name', 'arquivo')}]"
-                media_url = attachments[0].get("data_url") or attachments[0].get("url")
-                media_type = attachments[0].get("file_type", "document").split('/')[0]
-            else:
-                return {"status": "ignored", "reason": "empty content"}
-        else:
-            media_url = None
-            media_type = None
+        attachments = data.get("attachments", [])
+        
+        if not content and not attachments:
+            logger.info("Mensagem sem conteúdo")
+            return {"status": "ignored", "reason": "empty content"}
         
         # Buscar número do contato
         conversation = data.get("conversation", {})
-        contact_phone = (
-            conversation.get("meta", {}).get("sender", {}).get("phone_number") or
-            conversation.get("contact", {}).get("phone_number")
-        )
+        
+        # Tenta encontrar o telefone em diferentes lugares
+        contact_phone = None
+        
+        # 1. No meta do sender
+        if conversation.get("meta", {}).get("sender", {}).get("phone_number"):
+            contact_phone = conversation.get("meta", {}).get("sender", {}).get("phone_number")
+        
+        # 2. No contato direto
+        elif conversation.get("contact", {}).get("phone_number"):
+            contact_phone = conversation.get("contact", {}).get("phone_number")
+        
+        # 3. No sender do webhook
+        elif data.get("sender", {}).get("phone_number"):
+            contact_phone = data.get("sender", {}).get("phone_number")
+        
+        # 4. Buscar pela conversa se tiver o ID
+        elif conversation.get("id"):
+            # Buscar detalhes da conversa
+            conv_detail_url = f"{CHATWOOT_URL}/api/v1/accounts/{CHATWOOT_ACCOUNT_ID}/conversations/{conversation['id']}"
+            conv_response = requests.get(conv_detail_url, headers=get_chatwoot_headers(), timeout=10)
+            if conv_response.status_code == 200:
+                conv_data = conv_response.json()
+                contact_phone = conv_data.get("contact", {}).get("phone_number") or \
+                               conv_data.get("meta", {}).get("sender", {}).get("phone_number")
         
         if not contact_phone:
-            logger.error("Telefone não encontrado")
+            logger.error("Telefone não encontrado na mensagem")
+            logger.debug(f"Dados da conversa: {json.dumps(conversation, indent=2)}")
             return {"status": "error", "reason": "phone not found"}
         
-        # Limpar número para envio
+        # Limpar número para envio (apenas dígitos)
         destination = re.sub(r'\D', '', contact_phone)
         
-        logger.info(f"Enviando resposta para {destination}: {content[:100]}")
+        logger.info(f"Enviando resposta para {destination}")
         
-        # Enviar mensagem via WuzAPI
-        if media_url and media_type:
-            send_message_via_wuzapi(destination, content, media_url, media_type)
+        # Se tem anexo, processa como mídia
+        if attachments:
+            attachment = attachments[0]
+            media_url = attachment.get("data_url") or attachment.get("url")
+            media_type = attachment.get("file_type", "document").split('/')[0]
+            filename = attachment.get("file_name", "arquivo")
+            
+            send_message_via_wuzapi(destination, content or "", media_url, media_type)
         else:
+            # Mensagem de texto
             send_message_via_wuzapi(destination, content)
         
+        logger.info(f"✅ Mensagem enviada com sucesso para {destination}")
         return {"status": "success"}
         
     except Exception as e:
@@ -588,6 +627,11 @@ async def debug_env():
         "chatwoot_token_configured": bool(CHATWOOT_API_TOKEN),
         "wuzapi_token_configured": bool(WUZAPI_API_TOKEN)
     }
+
+@app.get("/debug/cache")
+async def debug_cache():
+    """Mostra o cache de conversas ativas"""
+    return {"conversation_cache": conversation_cache}
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=9000)
