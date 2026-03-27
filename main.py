@@ -9,7 +9,7 @@ from datetime import datetime
 from typing import Optional, Dict, Any
 import logging
 import uvicorn
-import base64
+import uuid
 
 # Configuração de logging
 logging.basicConfig(level=logging.INFO)
@@ -92,6 +92,9 @@ def extract_phone_number(sender_raw: str) -> str:
 def extract_jid_and_lid(sender_raw: str) -> tuple:
     """
     Extrai o JID (WhatsApp JID) e LID (WhatsApp LID) do formato do WuzAPI.
+    Para Chatwoot 4.12.1:
+    - WhatsApp JID: número completo com sufixo (ex: 553491115553:30@s.whatsapp.net)
+    - WhatsApp LID: identificador do dispositivo (se disponível)
     Retorna (jid, lid)
     """
     # JID é o identificador completo
@@ -101,8 +104,12 @@ def extract_jid_and_lid(sender_raw: str) -> tuple:
     lid = None
     if ':' in jid:
         parts = jid.split(':')
-        jid = parts[0]  # Remove o sufixo para o JID
-        lid = f"{parts[0]}:{parts[1].split('@')[0]}" if len(parts) > 1 else None
+        # LID é o número com o sufixo sem o @s.whatsapp.net
+        if len(parts) > 1:
+            lid = f"{parts[0]}:{parts[1].split('@')[0]}"
+    else:
+        # Se não tem sufixo, usa o número sem o @
+        lid = jid.split('@')[0]
     
     return jid, lid
 
@@ -110,49 +117,96 @@ def format_phone_for_chatwoot(phone_number: str) -> str:
     """Formata o número de telefone para o padrão do Chatwoot."""
     clean = re.sub(r'[^0-9]', '', phone_number)
     
+    # Garante que tem código do país
     if not clean.startswith('55'):
         clean = f"55{clean}"
     
     return f"+{clean}"
 
-def update_contact_whatsapp_fields(contact_id: int, phone_number: str, jid: str, lid: Optional[str] = None):
+def create_whatsapp_contact(name: str, phone_number: str, jid: str, lid: Optional[str] = None):
     """
-    Atualiza os campos nativos do WhatsApp no Chatwoot.
-    Campos: phone_number, whatsapp_chat_id, whatsapp_jid, whatsapp_lid
+    Cria um contato no Chatwoot com os campos nativos do WhatsApp.
+    Para Chatwoot 4.12.1, os campos são:
+    - phone_number: número formatado (+55...)
+    - whatsapp_chat_id: número limpo
+    - whatsapp_jid: JID completo
+    - whatsapp_lid: LID (se disponível)
     """
-    try:
-        # Endpoint para atualizar contato
-        contact_endpoint = f"{CHATWOOT_URL}/api/v1/accounts/{CHATWOOT_ACCOUNT_ID}/contacts/{contact_id}"
-        
-        # Formata o número
-        formatted_phone = format_phone_for_chatwoot(phone_number)
-        
-        # Preparar payload com campos do WhatsApp
-        payload = {
-            "phone_number": formatted_phone,
-            "custom_attributes": {
-                "whatsapp_chat_id": phone_number,
-                "whatsapp_jid": jid,
-                "whatsapp_lid": lid or phone_number
-            }
+    contact_endpoint = f"{CHATWOOT_URL}/api/v1/accounts/{CHATWOOT_ACCOUNT_ID}/contacts"
+    
+    formatted_phone = format_phone_for_chatwoot(phone_number)
+    clean_phone = re.sub(r'[^0-9]', '', phone_number)
+    
+    # Payload com campos nativos do WhatsApp
+    payload = {
+        "inbox_id": int(CHATWOOT_INBOX_ID),
+        "name": name,
+        "phone_number": formatted_phone,
+        "custom_attributes": {
+            "whatsapp_chat_id": clean_phone,
+            "whatsapp_jid": jid,
+            "whatsapp_lid": lid or clean_phone,
+            "whatsapp_instance": WUZAPI_INSTANCE_NAME
         }
-        
-        logger.info(f"📝 Atualizando campos WhatsApp do contato {contact_id}")
-        logger.info(f"   Phone: {formatted_phone}")
+    }
+    
+    try:
+        logger.info(f"📝 Criando contato WhatsApp:")
+        logger.info(f"   Nome: {name}")
+        logger.info(f"   Telefone: {formatted_phone}")
         logger.info(f"   JID: {jid}")
-        logger.info(f"   LID: {lid or phone_number}")
+        logger.info(f"   LID: {lid or clean_phone}")
+        
+        response = requests.post(contact_endpoint, headers=get_chatwoot_headers(), json=payload, timeout=10)
+        
+        if response.status_code == 200:
+            contact = response.json()["payload"]["contact"]
+            logger.info(f"✅ Contato criado: ID {contact['id']}")
+            return contact
+        else:
+            logger.error(f"❌ Erro ao criar contato: {response.status_code} - {response.text}")
+            return None
+            
+    except Exception as e:
+        logger.error(f"❌ Erro ao criar contato: {e}")
+        return None
+
+def update_whatsapp_contact(contact_id: int, name: str, phone_number: str, jid: str, lid: Optional[str] = None):
+    """
+    Atualiza um contato existente com os campos nativos do WhatsApp.
+    """
+    contact_endpoint = f"{CHATWOOT_URL}/api/v1/accounts/{CHATWOOT_ACCOUNT_ID}/contacts/{contact_id}"
+    
+    formatted_phone = format_phone_for_chatwoot(phone_number)
+    clean_phone = re.sub(r'[^0-9]', '', phone_number)
+    
+    payload = {
+        "name": name,
+        "phone_number": formatted_phone,
+        "custom_attributes": {
+            "whatsapp_chat_id": clean_phone,
+            "whatsapp_jid": jid,
+            "whatsapp_lid": lid or clean_phone,
+            "whatsapp_instance": WUZAPI_INSTANCE_NAME
+        }
+    }
+    
+    try:
+        logger.info(f"📝 Atualizando contato WhatsApp {contact_id}:")
+        logger.info(f"   Nome: {name}")
+        logger.info(f"   JID: {jid}")
         
         response = requests.put(contact_endpoint, headers=get_chatwoot_headers(), json=payload, timeout=10)
         
         if response.status_code == 200:
-            logger.info(f"✅ Campos WhatsApp atualizados com sucesso!")
+            logger.info(f"✅ Contato atualizado: ID {contact_id}")
             return True
         else:
-            logger.error(f"❌ Erro ao atualizar campos: {response.status_code} - {response.text}")
+            logger.error(f"❌ Erro ao atualizar contato: {response.status_code} - {response.text}")
             return False
             
     except Exception as e:
-        logger.error(f"❌ Erro ao atualizar campos WhatsApp: {e}")
+        logger.error(f"❌ Erro ao atualizar contato: {e}")
         return False
 
 def search_contact(phone_number: str):
@@ -174,7 +228,8 @@ def search_contact(phone_number: str):
         if data.get("meta", {}).get("count", 0) > 0:
             for contact in data.get("payload", []):
                 contact_phone = re.sub(r'[^0-9]', '', contact.get("phone_number", ""))
-                if contact_phone == search_phone or search_phone in contact_phone or contact_phone in search_phone:
+                # Verifica se o número corresponde
+                if contact_phone == search_phone or search_phone.endswith(contact_phone) or contact_phone.endswith(search_phone):
                     logger.info(f"✅ Contato encontrado: ID {contact['id']}")
                     return contact
         
@@ -184,54 +239,24 @@ def search_contact(phone_number: str):
         logger.error(f"❌ Erro ao buscar contato: {e}")
         return None
 
-def create_contact(name: str, phone_number: str, jid: str, lid: Optional[str] = None):
-    """Cria um novo contato no Chatwoot com os campos do WhatsApp."""
-    contact_endpoint = f"{CHATWOOT_URL}/api/v1/accounts/{CHATWOOT_ACCOUNT_ID}/contacts"
+def find_or_create_whatsapp_contact(name: str, sender_raw: str) -> Optional[int]:
+    """
+    Busca um contato ou cria um novo com os campos do WhatsApp.
+    """
+    clean_phone = extract_phone_number(sender_raw)
+    jid, lid = extract_jid_and_lid(sender_raw)
     
-    formatted_phone = format_phone_for_chatwoot(phone_number)
-        
-    payload = {
-        "inbox_id": int(CHATWOOT_INBOX_ID),
-        "name": name,
-        "phone_number": formatted_phone,
-        "custom_attributes": {
-            "whatsapp_chat_id": phone_number,
-            "whatsapp_jid": jid,
-            "whatsapp_lid": lid or phone_number
-        }
-    }
-    
-    try:
-        logger.info(f"📝 Criando contato: {name} ({formatted_phone})")
-        logger.info(f"   JID: {jid}")
-        logger.info(f"   LID: {lid or phone_number}")
-        
-        response = requests.post(contact_endpoint, headers=get_chatwoot_headers(), json=payload, timeout=10)
-        
-        if response.status_code != 200:
-            logger.error(f"Erro ao criar contato: {response.status_code} - {response.text}")
-            return None
-            
-        contact = response.json()["payload"]["contact"]
-        logger.info(f"✅ Contato criado: ID {contact['id']}")
-        return contact
-    except Exception as e:
-        logger.error(f"❌ Erro ao criar contato: {e}")
-        return None
-
-def search_or_create_contact(name: str, phone_number: str, jid: str, lid: Optional[str] = None) -> Optional[int]:
-    """Busca um contato e, se não encontrar, cria um novo. Atualiza campos WhatsApp."""
-    clean_phone = extract_phone_number(phone_number)
-    
+    # Busca contato existente
     contact = search_contact(clean_phone)
     
     if contact:
         contact_id = contact['id']
-        # Atualiza os campos WhatsApp mesmo se o contato já existir
-        update_contact_whatsapp_fields(contact_id, clean_phone, jid, lid)
+        # Atualiza os campos WhatsApp mesmo se já existir
+        update_whatsapp_contact(contact_id, name, clean_phone, jid, lid)
         return contact_id
     
-    new_contact = create_contact(name, clean_phone, jid, lid)
+    # Cria novo contato
+    new_contact = create_whatsapp_contact(name, clean_phone, jid, lid)
     if new_contact:
         return new_contact['id']
     
@@ -248,7 +273,7 @@ def find_or_create_conversation(contact_id: int) -> Optional[int]:
         if response.status_code == 200:
             conversations = response.json().get("payload", [])
             
-            # Filtrar apenas conversas abertas ou pendentes
+            # Filtra conversas abertas ou pendentes
             active_conversations = [c for c in conversations if c.get("status") in ["open", "pending"]]
             
             if active_conversations:
@@ -260,9 +285,12 @@ def find_or_create_conversation(contact_id: int) -> Optional[int]:
                 logger.info(f"✅ Conversa encontrada (inativa): ID {conv_id}")
                 return conv_id
         
-        logger.info(f"🆕 Criando nova conversa para contato {contact_id}")
+        logger.info(f"🆕 Criando nova conversa")
         create_conv_endpoint = f"{CHATWOOT_URL}/api/v1/accounts/{CHATWOOT_ACCOUNT_ID}/conversations"
-        payload = {"inbox_id": int(CHATWOOT_INBOX_ID), "contact_id": contact_id}
+        payload = {
+            "inbox_id": int(CHATWOOT_INBOX_ID),
+            "contact_id": contact_id
+        }
         
         create_response = requests.post(create_conv_endpoint, headers=get_chatwoot_headers(), json=payload, timeout=10)
         
@@ -299,7 +327,7 @@ def send_message_to_conversation(conversation_id: int, message_content: str):
         return None
 
 def send_message_via_wuzapi(phone_number: str, message: str, media_url: str = None, media_type: str = None):
-    """Envia uma mensagem via WuzAPI, podendo ser texto ou mídia."""
+    """Envia uma mensagem via WuzAPI."""
     if not all([WUZAPI_API_URL, WUZAPI_API_TOKEN]):
         logger.error("WuzAPI não configurada")
         return
@@ -307,12 +335,14 @@ def send_message_via_wuzapi(phone_number: str, message: str, media_url: str = No
     headers = {"Content-Type": "application/json", "token": WUZAPI_API_TOKEN}
     
     try:
-        # Se for mídia
+        # Limpa o número para envio
+        clean_number = re.sub(r'[^0-9]', '', phone_number)
+        
         if media_url and media_type:
-            logger.info(f"📤 Enviando mídia via WuzAPI para {phone_number}")
+            logger.info(f"📤 Enviando mídia via WuzAPI para {clean_number}")
             
             media_payload = {
-                "number": phone_number,
+                "number": clean_number,
                 "media": media_url,
                 "caption": message if message else ""
             }
@@ -328,15 +358,14 @@ def send_message_via_wuzapi(phone_number: str, message: str, media_url: str = No
                 media_payload["filename"] = "documento.pdf"
             else:
                 send_url = f"{WUZAPI_API_URL}/chat/send/text"
-                media_payload = {"number": phone_number, "text": message}
+                media_payload = {"number": clean_number, "text": message}
             
             response = requests.post(send_url, headers=headers, json=media_payload, timeout=30)
             
         else:
-            # Mensagem de texto
-            logger.info(f"📤 Enviando texto via WuzAPI para {phone_number}")
+            logger.info(f"📤 Enviando texto via WuzAPI para {clean_number}")
             send_url = f"{WUZAPI_API_URL}/chat/send/text"
-            payload = {"number": phone_number, "text": message}
+            payload = {"number": clean_number, "text": message}
             response = requests.post(send_url, headers=headers, json=payload, timeout=15)
         
         if response.status_code == 200:
@@ -351,10 +380,13 @@ def send_message_via_wuzapi(phone_number: str, message: str, media_url: str = No
 
 @app.post("/webhook/wuzapi")
 async def handle_wuzapi_webhook(request: Request):
-    """Recebe webhooks do WuzAPI."""
+    """Recebe webhooks do WuzAPI e encaminha para o Chatwoot."""
     try:
         data = await request.json()
         logger.info("📨 Webhook recebido do WuzAPI")
+        
+        # Log para debug
+        logger.debug(f"Dados: {json.dumps(data, indent=2)}")
         
         # Extrair dados
         raw_data = data.get("jsonData", data)
@@ -380,13 +412,8 @@ async def handle_wuzapi_webhook(request: Request):
             logger.info(f"Ignorando mensagem de grupo")
             return {"status": "ignored", "reason": "group chat"}
         
-        # Extrair JID e LID
-        jid, lid = extract_jid_and_lid(sender_raw)
-        
         # Extrair mensagem
         message_data = event_data.get("Message", event_data)
-        
-        # Mensagem de texto
         message_content = message_data.get("conversation") or message_data.get("body")
         
         if not message_content and message_data.get("extendedTextMessage"):
@@ -401,19 +428,17 @@ async def handle_wuzapi_webhook(request: Request):
         sender_name = info.get("PushName") or info.get("pushName") or sender_phone
         
         logger.info(f"Processando: {sender_name} ({sender_phone})")
-        logger.info(f"JID: {jid}")
-        logger.info(f"LID: {lid}")
         logger.info(f"Mensagem: {message_content[:100]}")
         
-        # Criar contato com campos WhatsApp
-        contact_id = search_or_create_contact(sender_name, sender_raw, jid, lid)
+        # Criar/atualizar contato com campos WhatsApp
+        contact_id = find_or_create_whatsapp_contact(sender_name, sender_raw)
         if not contact_id:
-            logger.error("Falha ao criar contato")
+            logger.error("Falha ao criar/atualizar contato")
             return {"status": "error", "reason": "contact failed"}
         
         logger.info(f"Contact ID: {contact_id}")
         
-        # Buscar conversa existente
+        # Buscar/criar conversa
         conversation_id = find_or_create_conversation(contact_id)
         if not conversation_id:
             logger.error("Falha ao criar conversa")
@@ -425,8 +450,8 @@ async def handle_wuzapi_webhook(request: Request):
         result = send_message_to_conversation(conversation_id, message_content)
         
         if result:
-            logger.info(f"✅ Sucesso! Mensagem enviada para conversa {conversation_id}")
-            return {"status": "success", "conversation_id": conversation_id}
+            logger.info(f"✅ Sucesso! Mensagem enviada")
+            return {"status": "success", "contact_id": contact_id, "conversation_id": conversation_id}
         else:
             logger.error("❌ Falha ao enviar mensagem")
             return {"status": "error", "reason": "send failed"}
@@ -460,18 +485,14 @@ async def handle_chatwoot_webhook(request: Request):
         
         # Buscar número do contato
         conversation = data.get("conversation", {})
-        
-        contact_phone = None
-        
-        # Tenta encontrar em custom_attributes primeiro
         contact = conversation.get("contact", {})
         custom_attrs = contact.get("custom_attributes", {})
         
+        contact_phone = None
+        
+        # Prioriza o whatsapp_chat_id
         if custom_attrs.get("whatsapp_chat_id"):
             contact_phone = custom_attrs.get("whatsapp_chat_id")
-        elif custom_attrs.get("whatsapp_jid"):
-            jid = custom_attrs.get("whatsapp_jid")
-            contact_phone = jid.split('@')[0] if '@' in jid else jid
         elif contact.get("phone_number"):
             contact_phone = contact.get("phone_number")
         elif conversation.get("meta", {}).get("sender", {}).get("phone_number"):
@@ -485,14 +506,13 @@ async def handle_chatwoot_webhook(request: Request):
         destination = re.sub(r'\D', '', contact_phone)
         
         logger.info(f"Enviando resposta para {destination}")
+        logger.info(f"Mensagem: {content[:100] if content else '[Mídia]'}")
         
-        # Se tem anexo, processa como mídia
+        # Enviar mensagem
         if attachments:
             attachment = attachments[0]
             media_url = attachment.get("data_url") or attachment.get("url")
             media_type = attachment.get("file_type", "document").split('/')[0]
-            filename = attachment.get("file_name", "arquivo")
-            
             send_message_via_wuzapi(destination, content or "", media_url, media_type)
         else:
             send_message_via_wuzapi(destination, content)
@@ -508,7 +528,8 @@ async def root():
     return {
         "status": "online",
         "service": "Ponte Ricard-ZAP",
-        "version": "1.0.0"
+        "version": "1.0.0",
+        "chatwoot_version": "4.12.1"
     }
 
 @app.get("/health")
@@ -522,9 +543,24 @@ async def debug_env():
         "chatwoot_account_id": CHATWOOT_ACCOUNT_ID,
         "chatwoot_inbox_id": CHATWOOT_INBOX_ID,
         "wuzapi_url": WUZAPI_API_URL,
+        "wuzapi_instance": WUZAPI_INSTANCE_NAME,
         "chatwoot_token_configured": bool(CHATWOOT_API_TOKEN),
         "wuzapi_token_configured": bool(WUZAPI_API_TOKEN)
     }
+
+@app.get("/debug/contact/{contact_id}")
+async def debug_contact(contact_id: int):
+    """Busca detalhes de um contato específico"""
+    try:
+        url = f"{CHATWOOT_URL}/api/v1/accounts/{CHATWOOT_ACCOUNT_ID}/contacts/{contact_id}"
+        response = requests.get(url, headers=get_chatwoot_headers(), timeout=10)
+        
+        if response.status_code == 200:
+            return response.json()
+        else:
+            return {"error": f"Status {response.status_code}", "response": response.text}
+    except Exception as e:
+        return {"error": str(e)}
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=9000)
