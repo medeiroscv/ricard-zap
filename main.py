@@ -82,12 +82,7 @@ def is_lid_identifier(identifier: str) -> bool:
     return identifier.endswith('@lid') if identifier else False
 
 def extract_phone_number(sender_raw: str) -> str:
-    """
-    Extrai o número de telefone do formato do WuzAPI.
-    Exemplos:
-    - 553491115553:30@s.whatsapp.net -> 553491115553
-    - 553496616325@s.whatsapp.net -> 553496616325
-    """
+    """Extrai o número de telefone do formato do WuzAPI."""
     if not sender_raw:
         return ""
     
@@ -96,11 +91,9 @@ def extract_phone_number(sender_raw: str) -> str:
     
     phone_with_suffix = sender_raw.split('@')[0]
     
-    # Remove sufixo como :30, :1, etc
     if ':' in phone_with_suffix:
         phone_with_suffix = phone_with_suffix.split(':')[0]
     
-    # Remove qualquer caractere não numérico
     clean_phone = re.sub(r'[^0-9]', '', phone_with_suffix)
     
     return clean_phone
@@ -181,10 +174,7 @@ def format_phone_for_chatwoot(phone_number: str) -> str:
     return f"+{clean}"
 
 def clean_number_for_wuzapi(phone_number: str) -> str:
-    """
-    Limpa o número de telefone para envio via WuzAPI.
-    Remove sufixos como :30 e mantém apenas números.
-    """
+    """Limpa o número de telefone para envio via WuzAPI."""
     if not phone_number:
         return ""
     
@@ -203,12 +193,13 @@ def clean_number_for_wuzapi(phone_number: str) -> str:
     return clean
 
 # ============================================================
-# FUNÇÕES PARA MÍDIAS
+# FUNÇÕES PARA MÍDIAS - CORRIGIDAS
 # ============================================================
 
 def extract_media_message(message_data: dict) -> Tuple[Optional[str], Optional[str], Optional[str], Optional[str]]:
     """
     Extrai informações de mídia da mensagem do WuzAPI.
+    Busca em diferentes estruturas possíveis.
     Retorna: (media_type, media_url, caption, filename)
     """
     media_type = None
@@ -216,56 +207,88 @@ def extract_media_message(message_data: dict) -> Tuple[Optional[str], Optional[s
     caption = None
     filename = None
     
-    # Imagem
+    logger.debug(f"Extraindo mídia de: {json.dumps(message_data, indent=2)[:500]}")
+    
+    # Tenta diferentes estruturas possíveis
+    media_message = None
+    
+    # Estrutura 1: direto no message_data
     if message_data.get("imageMessage"):
+        media_message = message_data.get("imageMessage")
         media_type = "image"
-        img = message_data.get("imageMessage", {})
-        media_url = img.get("url")
-        caption = img.get("caption", "")
         filename = "imagem.jpg"
-        logger.info(f"📷 Imagem detectada")
-    
-    # Áudio
     elif message_data.get("audioMessage"):
+        media_message = message_data.get("audioMessage")
         media_type = "audio"
-        audio = message_data.get("audioMessage", {})
-        media_url = audio.get("url")
         filename = "audio.ogg"
-        logger.info(f"🎵 Áudio detectado")
-    
-    # Vídeo
     elif message_data.get("videoMessage"):
+        media_message = message_data.get("videoMessage")
         media_type = "video"
-        video = message_data.get("videoMessage", {})
-        media_url = video.get("url")
-        caption = video.get("caption", "")
         filename = "video.mp4"
-        logger.info(f"🎬 Vídeo detectado")
-    
-    # Documento
     elif message_data.get("documentMessage"):
+        media_message = message_data.get("documentMessage")
         media_type = "document"
-        doc = message_data.get("documentMessage", {})
-        media_url = doc.get("url")
-        filename = doc.get("fileName", "documento.pdf")
-        caption = doc.get("caption", "")
-        logger.info(f"📄 Documento detectado: {filename}")
-    
-    # Sticker
+        filename = media_message.get("fileName", "documento.pdf")
     elif message_data.get("stickerMessage"):
+        media_message = message_data.get("stickerMessage")
         media_type = "sticker"
-        sticker = message_data.get("stickerMessage", {})
-        media_url = sticker.get("url")
         filename = "sticker.webp"
-        logger.info(f"🏷️ Sticker detectado")
     
-    return media_type, media_url, caption, filename
+    # Estrutura 2: dentro de "message"
+    if not media_message and message_data.get("message"):
+        msg_inner = message_data.get("message", {})
+        if msg_inner.get("imageMessage"):
+            media_message = msg_inner.get("imageMessage")
+            media_type = "image"
+            filename = "imagem.jpg"
+        elif msg_inner.get("audioMessage"):
+            media_message = msg_inner.get("audioMessage")
+            media_type = "audio"
+            filename = "audio.ogg"
+        elif msg_inner.get("videoMessage"):
+            media_message = msg_inner.get("videoMessage")
+            media_type = "video"
+            filename = "video.mp4"
+        elif msg_inner.get("documentMessage"):
+            media_message = msg_inner.get("documentMessage")
+            media_type = "document"
+            filename = media_message.get("fileName", "documento.pdf")
+        elif msg_inner.get("stickerMessage"):
+            media_message = msg_inner.get("stickerMessage")
+            media_type = "sticker"
+            filename = "sticker.webp"
+    
+    if media_message:
+        # Extrai URL de diferentes campos possíveis
+        media_url = media_message.get("url") or media_message.get("directPath") or media_message.get("mediaUrl")
+        
+        # Extrai legenda
+        caption = media_message.get("caption") or media_message.get("text") or ""
+        
+        # Se não tem URL, tenta pegar o ID para construir
+        if not media_url:
+            media_id = media_message.get("id") or media_message.get("mediaKey")
+            if media_id and WUZAPI_API_URL:
+                media_url = f"{WUZAPI_API_URL}/media/get/{media_id}"
+                logger.info(f"🔗 URL construída a partir do ID: {media_url}")
+        
+        logger.info(f"📷 Mídia detectada: {media_type}")
+        logger.info(f"   URL: {media_url}")
+        logger.info(f"   Legenda: {caption[:50] if caption else 'sem legenda'}")
+        
+        return media_type, media_url, caption, filename
+    
+    return None, None, None, None
 
 def download_media_from_wuzapi(media_url: str) -> Optional[bytes]:
     """Baixa mídia da WuzAPI usando a URL fornecida."""
+    if not media_url:
+        logger.error("URL da mídia vazia")
+        return None
+    
     try:
         headers = {"token": WUZAPI_API_TOKEN}
-        logger.info(f"📥 Baixando mídia...")
+        logger.info(f"📥 Baixando mídia de: {media_url}")
         response = requests.get(media_url, headers=headers, timeout=30)
         response.raise_for_status()
         logger.info(f"✅ Mídia baixada: {len(response.content)} bytes")
@@ -276,10 +299,12 @@ def download_media_from_wuzapi(media_url: str) -> Optional[bytes]:
 
 def upload_media_to_chatwoot(account_id: int, file_content: bytes, filename: str) -> Optional[str]:
     """Faz upload de mídia para o Chatwoot e retorna a URL."""
+    if not file_content:
+        return None
+    
     try:
         upload_url = f"{CHATWOOT_URL}/api/v1/accounts/{account_id}/contacts/upload"
         
-        # Determina o tipo MIME
         mime_type, _ = mimetypes.guess_type(filename)
         if not mime_type:
             mime_type = 'application/octet-stream'
@@ -312,7 +337,6 @@ def send_media_message_to_chatwoot(conversation_id: int, media_type: str, media_
     """Envia uma mensagem com mídia para o Chatwoot."""
     message_endpoint = f"{CHATWOOT_URL}/api/v1/accounts/{CHATWOOT_ACCOUNT_ID}/conversations/{conversation_id}/messages"
     
-    # Formata a mensagem com a mídia
     if media_type == "image":
         content = f"![{caption}]({media_url})"
         if caption:
@@ -368,7 +392,6 @@ def send_media_via_wuzapi(phone_number: str, media_url: str, media_type: str, ca
             "caption": caption
         }
         
-        # Define o endpoint correto baseado no tipo
         endpoints = {
             "image": f"{WUZAPI_API_URL}/chat/send/image",
             "video": f"{WUZAPI_API_URL}/chat/send/video",
@@ -378,7 +401,6 @@ def send_media_via_wuzapi(phone_number: str, media_url: str, media_type: str, ca
         
         send_url = endpoints.get(media_type, f"{WUZAPI_API_URL}/chat/send/text")
         
-        # Para documentos, adiciona filename
         if media_type == "document":
             payload["filename"] = "documento.pdf"
         
@@ -603,7 +625,6 @@ def send_message_via_wuzapi(phone_number: str, message: str, media_url: str = No
         logger.error("WuzAPI não configurada")
         return False
 
-    # Se for mídia, usa a função específica
     if media_url and media_type:
         return send_media_via_wuzapi(phone_number, media_url, media_type, message)
 
@@ -617,7 +638,6 @@ def send_message_via_wuzapi(phone_number: str, message: str, media_url: str = No
         
         send_url = f"{WUZAPI_API_URL}/chat/send/text"
         
-        # Diferentes formatos de payload para tentar
         payloads_to_try = [
             {"number": destination, "text": message},
             {"phone": destination, "text": message},
@@ -648,7 +668,7 @@ def send_message_via_wuzapi(phone_number: str, message: str, media_url: str = No
         return False
 
 # ============================================================
-# FUNÇÃO PARA EXTRAIR DESTINATÁRIO DO WEBHOOK DO CHATWOOT
+# FUNÇÃO PARA EXTRAIR DESTINATÁRIO
 # ============================================================
 
 def extract_destination_from_chatwoot_webhook(data: dict) -> Optional[str]:
@@ -731,12 +751,15 @@ async def handle_wuzapi_webhook(request: Request):
         
         message_data = event_data.get("Message", event_data)
         
+        # Log para debug
+        logger.debug(f"Message data: {json.dumps(message_data, indent=2)[:1000]}")
+        
         # Verificar se é mídia
         media_type, media_url, caption, filename = extract_media_message(message_data)
         
         message_content = None
         
-        if media_type:
+        if media_type and media_url:
             # É uma mensagem com mídia
             logger.info(f"📷 Mídia recebida: {media_type}")
             message_content = caption or f"[{media_type.upper()}]"
@@ -750,6 +773,9 @@ async def handle_wuzapi_webhook(request: Request):
                 
                 if uploaded_url:
                     media_url = uploaded_url
+            else:
+                # Se não conseguiu baixar, envia apenas a URL
+                logger.warning("Não foi possível baixar a mídia, enviando apenas URL")
         else:
             # Mensagem de texto
             message_content = message_data.get("conversation") or message_data.get("body")
@@ -822,7 +848,6 @@ async def handle_chatwoot_webhook(request: Request):
         
         success = False
         
-        # Verificar se tem anexos (mídia)
         if attachments:
             for att in attachments:
                 media_url = att.get("data_url") or att.get("url")
@@ -833,7 +858,6 @@ async def handle_chatwoot_webhook(request: Request):
                 success = send_media_via_wuzapi(destination, media_url, media_type, caption)
                 break
         else:
-            # Mensagem de texto
             success = send_message_via_wuzapi(destination, content)
         
         if success:
@@ -875,26 +899,13 @@ async def debug_env():
         "wuzapi_token_configured": bool(WUZAPI_API_TOKEN)
     }
 
-@app.get("/debug/contacts")
-async def debug_contacts():
-    """Lista os últimos contatos criados"""
+@app.post("/debug/webhook")
+async def debug_webhook(request: Request):
+    """Endpoint para debug do webhook"""
     try:
-        url = f"{CHATWOOT_URL}/api/v1/accounts/{CHATWOOT_ACCOUNT_ID}/contacts"
-        params = {"sort": "-created_at", "limit": 10}
-        response = requests.get(url, headers=get_chatwoot_headers(), params=params, timeout=10)
-        
-        if response.status_code == 200:
-            contacts = response.json().get("payload", [])
-            result = []
-            for c in contacts[:5]:
-                result.append({
-                    "id": c.get("id"),
-                    "name": c.get("name"),
-                    "phone": c.get("phone_number"),
-                    "custom": c.get("custom_attributes", {})
-                })
-            return {"contacts": result}
-        return {"error": f"Status {response.status_code}"}
+        body = await request.body()
+        logger.info(f"🔍 Debug webhook - Body: {body.decode('utf-8')[:2000]}")
+        return {"status": "received"}
     except Exception as e:
         return {"error": str(e)}
 
