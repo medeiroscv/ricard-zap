@@ -43,20 +43,11 @@ def get_headers():
 # ---------------- NORMALIZAÇÃO ---------------- #
 
 def normalize_identifier(sender_raw: str):
-    """
-    🔥 ESSA FUNÇÃO RESOLVE SEU PROBLEMA
-
-    - Prioriza número
-    - fallback para JID
-    - evita duplicação
-    """
-
     if "@s.whatsapp.net" in sender_raw:
         number = sender_raw.split("@")[0].split(":")[0]
         number = re.sub(r"\D", "", number)
         return number, sender_raw
 
-    # caso @lid
     return sender_raw, sender_raw
 
 # ---------------- CONTATO ---------------- #
@@ -155,6 +146,10 @@ def send_to_whatsapp(identifier, msg):
 @app.post("/webhook/wuzapi")
 async def wuzapi(request: Request):
     data = await request.json()
+
+    # 🔥 LOG PRA DEBUG
+    logger.info(f"🔥 RAW DATA: {json.dumps(data)[:500]}")
+
     raw = data.get("jsonData", data)
 
     if raw.get("type") != "Message":
@@ -168,14 +163,37 @@ async def wuzapi(request: Request):
     if not sender:
         return {"status": "ignored"}
 
-    # bloqueia grupo
-    if info.get("IsGroup") or "@g.us" in str(info.get("Chat", "")):
+    # 🔥 FILTRO DE GRUPO CONFIÁVEL
+    chat = info.get("Chat") or info.get("ChatJid") or ""
+    if "@g.us" in str(chat):
         return {"status": "ignored"}
 
-    msg = event.get("Message", {}).get("conversation")
+    # 🔥 PARSER UNIVERSAL (CORREÇÃO PRINCIPAL)
+    message_data = event.get("Message", {})
 
+    msg = None
+
+    if "conversation" in message_data:
+        msg = message_data["conversation"]
+
+    elif "extendedTextMessage" in message_data:
+        msg = message_data["extendedTextMessage"].get("text")
+
+    elif "imageMessage" in message_data:
+        msg = message_data["imageMessage"].get("caption", "[imagem]")
+
+    elif "videoMessage" in message_data:
+        msg = message_data["videoMessage"].get("caption", "[vídeo]")
+
+    elif "audioMessage" in message_data:
+        msg = "[áudio]"
+
+    elif "documentMessage" in message_data:
+        msg = "[documento]"
+
+    # 🔥 fallback pra não perder mensagem
     if not msg:
-        return {"status": "ignored"}
+        msg = json.dumps(message_data)[:200]
 
     name = info.get("PushName") or "Cliente"
 
