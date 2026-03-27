@@ -46,7 +46,7 @@ def get_chatwoot_headers():
     }
 
 # ---------------- APP ---------------- #
-app = FastAPI(title="Ponte Ricard-ZAP", version="2.0.0")
+app = FastAPI(title="Ponte Ricard-ZAP", version="3.0.0")
 
 # ---------------- UTILS ---------------- #
 
@@ -80,8 +80,10 @@ def search_contact(phone: str):
 
         data = res.json()
         for c in data.get("payload", []):
-            c_phone = re.sub(r'\D', '', c.get("phone_number", ""))
-            if phone in c_phone or c_phone in phone:
+            identifier = re.sub(r'\D', '', str(c.get("identifier", "")))
+            phone_c = re.sub(r'\D', '', c.get("phone_number", ""))
+
+            if phone == identifier or phone == phone_c:
                 return c
     except Exception as e:
         logger.error(e)
@@ -95,8 +97,11 @@ def create_contact(name, phone, jid, lid):
         "inbox_id": int(CHATWOOT_INBOX_ID),
         "name": name,
         "phone_number": format_phone(phone),
+
+        # 🔥 ESSENCIAL PRA RESPOSTA FUNCIONAR
+        "identifier": phone,
+
         "custom_attributes": {
-            "whatsapp_chat_id": phone,
             "whatsapp_jid": jid,
             "whatsapp_lid": lid,
             "whatsapp_instance": WUZAPI_INSTANCE_NAME
@@ -105,8 +110,11 @@ def create_contact(name, phone, jid, lid):
 
     try:
         res = requests.post(url, headers=get_chatwoot_headers(), json=payload, timeout=10)
+
         if res.status_code in [200, 201]:
             return res.json().get("payload", {}).get("contact")
+
+        logger.error(res.text)
     except Exception as e:
         logger.error(e)
 
@@ -118,8 +126,8 @@ def update_contact(contact_id, name, phone, jid, lid):
     payload = {
         "name": name,
         "phone_number": format_phone(phone),
+        "identifier": phone,
         "custom_attributes": {
-            "whatsapp_chat_id": phone,
             "whatsapp_jid": jid,
             "whatsapp_lid": lid,
             "whatsapp_instance": WUZAPI_INSTANCE_NAME
@@ -136,6 +144,7 @@ def find_or_create_whatsapp_contact(name, sender_raw):
     jid, lid = extract_jid_and_lid(sender_raw)
 
     contact = search_contact(phone)
+
     if contact:
         update_contact(contact["id"], name, phone, jid, lid)
         return contact["id"]
@@ -150,14 +159,18 @@ def find_or_create_conversation(contact_id):
 
     try:
         res = requests.get(url, headers=get_chatwoot_headers(), timeout=10)
+
         if res.status_code == 200:
             convs = res.json().get("payload", [])
             active = [c for c in convs if c.get("status") in ["open", "pending"]]
+
             if active:
                 return active[0]["id"]
+
             if convs:
                 return convs[0]["id"]
 
+        # cria nova
         create_url = f"{CHATWOOT_URL}/api/v1/accounts/{CHATWOOT_ACCOUNT_ID}/conversations"
         payload = {
             "inbox_id": int(CHATWOOT_INBOX_ID),
@@ -165,6 +178,7 @@ def find_or_create_conversation(contact_id):
         }
 
         res = requests.post(create_url, headers=get_chatwoot_headers(), json=payload, timeout=10)
+
         if res.status_code in [200, 201]:
             return res.json().get("id")
 
@@ -177,6 +191,7 @@ def find_or_create_conversation(contact_id):
 
 def send_message_to_conversation(conversation_id, content):
     url = f"{CHATWOOT_URL}/api/v1/accounts/{CHATWOOT_ACCOUNT_ID}/conversations/{conversation_id}/messages"
+
     payload = {
         "content": content,
         "message_type": "incoming"
@@ -191,6 +206,7 @@ def send_message_to_conversation(conversation_id, content):
 
 def send_message_via_wuzapi(phone, text):
     url = f"{WUZAPI_API_URL}/chat/send/text"
+
     payload = {
         "number": re.sub(r'\D', '', phone),
         "text": text
@@ -224,7 +240,7 @@ async def handle_wuzapi_webhook(request: Request):
         chat = info.get("Chat") or info.get("ChatJid") or ""
         is_group = info.get("IsGroup")
 
-        # 🔥 CORREÇÃO CRÍTICA AQUI
+        # 🔥 BLOQUEIO DEFINITIVO DE GRUPO
         if is_group is True or "@g.us" in str(chat):
             return {"status": "ignored", "reason": "group"}
 
@@ -288,7 +304,7 @@ async def handle_chatwoot_webhook(request: Request):
         content = data.get("content")
 
         contact = data.get("conversation", {}).get("contact", {})
-        phone = contact.get("phone_number")
+        phone = contact.get("identifier") or contact.get("phone_number")
 
         if not phone:
             return {"status": "error"}
@@ -305,7 +321,7 @@ async def handle_chatwoot_webhook(request: Request):
 
 @app.get("/")
 async def root():
-    return {"status": "online"}
+    return {"status": "online", "version": "3.0.0"}
 
 @app.get("/health")
 async def health():
