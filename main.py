@@ -880,4 +880,23 @@ async def debug_contacts():
     """Lista os últimos contatos criados"""
     try:
         url = f"{CHATWOOT_URL}/api/v1/accounts/{CHATWOOT_ACCOUNT_ID}/contacts"
-        params = {"sort":
+        params = {"sort": "-created_at", "limit": 10}
+        response = requests.get(url, headers=get_chatwoot_headers(), params=params, timeout=10)
+        
+        if response.status_code == 200:
+            contacts = response.json().get("payload", [])
+            result = []
+            for c in contacts[:5]:
+                result.append({
+                    "id": c.get("id"),
+                    "name": c.get("name"),
+                    "phone": c.get("phone_number"),
+                    "custom": c.get("custom_attributes", {})
+                })
+            return {"contacts": result}
+        return {"error": f"Status {response.status_code}"}
+    except Exception as e:
+        return {"error": str(e)}
+
+if __name__ == "__main__":
+    uvicorn.run(app, host="0.0.0.0", port=9000)
