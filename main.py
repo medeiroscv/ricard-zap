@@ -81,7 +81,12 @@ def is_lid_identifier(identifier: str) -> bool:
     return identifier.endswith('@lid') if identifier else False
 
 def extract_phone_number(sender_raw: str) -> str:
-    """Extrai o número de telefone de diferentes formatos."""
+    """
+    Extrai o número de telefone do formato do WuzAPI.
+    Exemplos:
+    - 553491115553:30@s.whatsapp.net -> 553491115553
+    - 553496616325@s.whatsapp.net -> 553496616325
+    """
     if not sender_raw:
         return ""
     
@@ -90,9 +95,11 @@ def extract_phone_number(sender_raw: str) -> str:
     
     phone_with_suffix = sender_raw.split('@')[0]
     
+    # Remove sufixo como :30, :1, etc
     if ':' in phone_with_suffix:
         phone_with_suffix = phone_with_suffix.split(':')[0]
     
+    # Remove qualquer caractere não numérico
     clean_phone = re.sub(r'[^0-9]', '', phone_with_suffix)
     
     return clean_phone
@@ -171,6 +178,24 @@ def format_phone_for_chatwoot(phone_number: str) -> str:
         clean = f"55{clean}"
     
     return f"+{clean}"
+
+def clean_number_for_wuzapi(phone_number: str) -> str:
+    """
+    Limpa o número de telefone para envio via WuzAPI.
+    Remove sufixos como :30 e mantém apenas números.
+    Ex: 553491115553:30@s.whatsapp.net -> 553491115553
+    """
+    if not phone_number:
+        return ""
+    
+    # Se for LID, mantém como está
+    if is_lid_identifier(phone_number):
+        return phone_number
+    
+    # Extrai apenas números
+    clean = re.sub(r'[^0-9]', '', phone_number)
+    
+    return clean
 
 # ============================================================
 # FUNÇÕES DE INTERAÇÃO COM O CHATWOOT
@@ -384,10 +409,12 @@ def send_message_via_wuzapi(phone_number: str, message: str, media_url: str = No
     headers = {"Content-Type": "application/json", "token": WUZAPI_API_TOKEN}
     
     try:
+        # Limpa o número corretamente para envio
         if is_lid_identifier(phone_number):
             destination = phone_number
         else:
-            destination = re.sub(r'[^0-9]', '', phone_number)
+            # Extrai apenas números, removendo sufixos como :30
+            destination = clean_number_for_wuzapi(phone_number)
         
         logger.info(f"📤 Enviando para: {destination}")
         logger.info(f"   Mensagem: {message[:100] if message else '[Mídia]'}")
@@ -455,10 +482,6 @@ def extract_destination_from_chatwoot_webhook(data: dict) -> Optional[str]:
         logger.info(f"✅ Destinatário encontrado em contact.custom_attributes.whatsapp_lid: {custom.get('whatsapp_lid')}")
         return custom.get("whatsapp_lid")
     
-    if custom.get("whatsapp_real_number"):
-        logger.info(f"✅ Destinatário encontrado em contact.custom_attributes.whatsapp_real_number: {custom.get('whatsapp_real_number')}")
-        return custom.get("whatsapp_real_number")
-    
     # 3. Buscar no phone_number do contato
     if contact.get("phone_number"):
         phone = contact.get("phone_number")
@@ -487,8 +510,6 @@ def extract_destination_from_chatwoot_webhook(data: dict) -> Optional[str]:
                     return conv_custom.get("whatsapp_jid")
                 if conv_custom.get("whatsapp_lid"):
                     return conv_custom.get("whatsapp_lid")
-                if conv_custom.get("whatsapp_real_number"):
-                    return conv_custom.get("whatsapp_real_number")
                 if conv_contact.get("phone_number"):
                     return conv_contact.get("phone_number")
         except Exception as e:
@@ -511,6 +532,7 @@ async def handle_wuzapi_webhook(request: Request):
         event_type = raw_data.get("type")
         
         if event_type != "Message":
+            logger.info(f"Ignorando evento: {event_type}")
             return {"status": "ignored", "reason": f"event is {event_type}"}
         
         event_data = raw_data.get("event", {})
@@ -584,7 +606,7 @@ async def handle_chatwoot_webhook(request: Request):
         message_type = data.get("message_type")
         logger.info(f"Tipo de mensagem: {message_type}")
         
-        # Aceitar outgoing (mensagens enviadas pelo agente)
+        # Aceitar apenas mensagens outgoing (enviadas pelo agente)
         if message_type != "outgoing":
             logger.info(f"Ignorando tipo: {message_type}")
             return {"status": "ignored", "reason": f"invalid message_type: {message_type}"}
@@ -611,7 +633,6 @@ async def handle_chatwoot_webhook(request: Request):
         
         if not destination:
             logger.error("❌ NÃO FOI POSSÍVEL ENCONTRAR O DESTINATÁRIO")
-            logger.error(f"Dados completos: {json.dumps(data, indent=2)[:1000]}")
             return {"status": "error", "reason": "destination not found"}
         
         # ============================================================
