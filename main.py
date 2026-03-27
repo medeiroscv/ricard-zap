@@ -183,7 +183,11 @@ def clean_number_for_wuzapi(phone_number: str) -> str:
     """
     Limpa o número de telefone para envio via WuzAPI.
     Remove sufixos como :30 e mantém apenas números.
-    Ex: 553491115553:30@s.whatsapp.net -> 553491115553
+    
+    Exemplos:
+    - 553491115553:30@s.whatsapp.net -> 553491115553
+    - 55349111555330 -> 553491115553 (remove sufixo de 2 dígitos no final)
+    - 553491115553 -> 553491115553
     """
     if not phone_number:
         return ""
@@ -194,6 +198,16 @@ def clean_number_for_wuzapi(phone_number: str) -> str:
     
     # Extrai apenas números
     clean = re.sub(r'[^0-9]', '', phone_number)
+    
+    # Verifica se tem sufixo de 2 dígitos (como :30) que ficou grudado
+    # Exemplo: 55349111555330 -> deve ser 553491115553
+    # O número brasileiro tem 13 dígitos (55 + 11 + 9 dígitos)
+    if len(clean) == 15 and clean.endswith('30'):
+        clean = clean[:-2]
+        logger.info(f"   Removido sufixo '30' do número: {clean}")
+    elif len(clean) == 14 and clean.endswith('30'):
+        clean = clean[:-2]
+        logger.info(f"   Removido sufixo '30' do número: {clean}")
     
     return clean
 
@@ -463,36 +477,32 @@ def extract_destination_from_chatwoot_webhook(data: dict) -> Optional[str]:
     custom_attrs = sender_meta.get("custom_attributes", {})
     
     if custom_attrs.get("whatsapp_jid"):
-        logger.info(f"✅ Destinatário encontrado em meta.sender.custom_attributes.whatsapp_jid: {custom_attrs.get('whatsapp_jid')}")
-        return custom_attrs.get("whatsapp_jid")
+        jid = custom_attrs.get("whatsapp_jid")
+        logger.info(f"✅ Destinatário encontrado: {jid}")
+        return jid
     
     if custom_attrs.get("whatsapp_lid"):
-        logger.info(f"✅ Destinatário encontrado em meta.sender.custom_attributes.whatsapp_lid: {custom_attrs.get('whatsapp_lid')}")
-        return custom_attrs.get("whatsapp_lid")
+        lid = custom_attrs.get("whatsapp_lid")
+        logger.info(f"✅ Destinatário encontrado: {lid}")
+        return lid
     
-    # 2. Buscar no contact.custom_attributes (estrutura alternativa)
+    # 2. Buscar no contact.custom_attributes
     contact = conversation.get("contact", {})
     custom = contact.get("custom_attributes", {})
     
     if custom.get("whatsapp_jid"):
-        logger.info(f"✅ Destinatário encontrado em contact.custom_attributes.whatsapp_jid: {custom.get('whatsapp_jid')}")
         return custom.get("whatsapp_jid")
     
     if custom.get("whatsapp_lid"):
-        logger.info(f"✅ Destinatário encontrado em contact.custom_attributes.whatsapp_lid: {custom.get('whatsapp_lid')}")
         return custom.get("whatsapp_lid")
     
     # 3. Buscar no phone_number do contato
     if contact.get("phone_number"):
-        phone = contact.get("phone_number")
-        logger.info(f"✅ Destinatário encontrado em contact.phone_number: {phone}")
-        return phone
+        return contact.get("phone_number")
     
     # 4. Buscar no meta.sender.phone_number
     if sender_meta.get("phone_number"):
-        phone = sender_meta.get("phone_number")
-        logger.info(f"✅ Destinatário encontrado em meta.sender.phone_number: {phone}")
-        return phone
+        return sender_meta.get("phone_number")
     
     # 5. Buscar pela conversa via API
     conversation_id = conversation.get("id") or data.get("conversation_id")
@@ -688,29 +698,6 @@ async def debug_env():
         "chatwoot_token_configured": bool(CHATWOOT_API_TOKEN),
         "wuzapi_token_configured": bool(WUZAPI_API_TOKEN)
     }
-
-@app.get("/debug/contacts")
-async def debug_contacts():
-    """Lista os últimos contatos criados"""
-    try:
-        url = f"{CHATWOOT_URL}/api/v1/accounts/{CHATWOOT_ACCOUNT_ID}/contacts"
-        params = {"sort": "-created_at", "limit": 10}
-        response = requests.get(url, headers=get_chatwoot_headers(), params=params, timeout=10)
-        
-        if response.status_code == 200:
-            contacts = response.json().get("payload", [])
-            result = []
-            for c in contacts[:5]:
-                result.append({
-                    "id": c.get("id"),
-                    "name": c.get("name"),
-                    "phone": c.get("phone_number"),
-                    "custom": c.get("custom_attributes", {})
-                })
-            return {"contacts": result}
-        return {"error": f"Status {response.status_code}"}
-    except Exception as e:
-        return {"error": str(e)}
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=9000)
