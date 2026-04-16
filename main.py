@@ -286,91 +286,170 @@ def extract_media_message(message_data: dict) -> Tuple[Optional[str], Optional[s
     
     return None, None, None, None
 
-def download_media_from_wuzapi(media_id: str) -> Optional[bytes]:
-    """Baixa mídia da WuzAPI usando o ID."""
+def download_media_from_wuzapi(media_id: str, media_type: str = None) -> Optional[bytes]:
+    """Baixa mídia da WuzAPI usando o ID - versão com múltiplas tentativas."""
     if not media_id:
         logger.error("ID da mídia vazio")
         return None
     
+    headers = {"token": WUZAPI_API_TOKEN}
+    
+    # Lista de possíveis endpoints (ajuste conforme sua WuzAPI)
+    possible_urls = [
+        f"{WUZAPI_API_URL}/media/get/{media_id}",
+        f"{WUZAPI_API_URL}/media/download/{media_id}",
+        f"{WUZAPI_API_URL}/message/downloadMedia?mediaKey={media_id}",
+        f"{WUZAPI_API_URL}/chat/getMedia?id={media_id}",
+    ]
+    
+    for url in possible_urls:
+        try:
+            logger.info(f"📥 Tentando baixar: {url}")
+            response = requests.get(url, headers=headers, timeout=30)
+            
+            if response.status_code == 200 and len(response.content) > 100:
+                logger.info(f"✅ Baixado {len(response.content)} bytes de {url}")
+                return response.content
+            else:
+                logger.debug(f"   Falhou: status {response.status_code}")
+        except Exception as e:
+            logger.debug(f"   Erro: {e}")
+            continue
+    
+    # Se chegou aqui, tenta via POST
     try:
-        # Endpoint para baixar mídia da WuzAPI
-        media_url = f"{WUZAPI_API_URL}/media/get/{media_id}"
-        headers = {"token": WUZAPI_API_TOKEN}
-        
-        logger.info(f"📥 Baixando mídia ID: {media_id}")
-        logger.info(f"   URL: {media_url}")
-        
-        response = requests.get(media_url, headers=headers, timeout=30)
-        
-        if response.status_code == 200:
-            logger.info(f"✅ Mídia baixada: {len(response.content)} bytes")
+        post_url = f"{WUZAPI_API_URL}/message/download"
+        payload = {"mediaKey": media_id}
+        response = requests.post(post_url, headers=headers, json=payload, timeout=30)
+        if response.status_code == 200 and len(response.content) > 100:
+            logger.info(f"✅ Baixado via POST: {len(response.content)} bytes")
             return response.content
-        else:
-            logger.error(f"❌ Erro ao baixar: {response.status_code} - {response.text[:200]}")
-            return None
     except Exception as e:
-        logger.error(f"❌ Erro ao baixar mídia: {e}")
-        return None
+        logger.error(f"   POST também falhou: {e}")
+    
+    logger.error(f"❌ Não foi possível baixar mídia {media_id}")
+    return None
 
-def upload_media_to_chatwoot(account_id: int, file_content: bytes, filename: str) -> Optional[str]:
+def upload_media_to_chatwoot(conversation_id: int, file_content: bytes, filename: str, caption: str = "") -> Optional[dict]:
     """
-    Faz upload de mídia para o Chatwoot.
-    Com ACTIVE_STORAGE_SERVICE=local, os arquivos são salvos em /storage
+    Envia mídia como anexo de mensagem no Chatwoot.
+    Retorna a mensagem criada ou None.
     """
-    if not file_content:
+    if not file_content or not conversation_id:
+        logger.error("Missing file_content or conversation_id")
         return None
     
     try:
-        # Endpoint de upload do Chatwoot
-        upload_url = f"{CHATWOOT_URL}/api/v1/accounts/{account_id}/contacts/upload"
+        # Endpoint correto para criar mensagem com anexo
+        message_url = f"{CHATWOOT_URL}/api/v1/accounts/{CHATWOOT_ACCOUNT_ID}/conversations/{conversation_id}/messages"
         
         # Determina o tipo MIME
-        mime_type, _ = mimetypes.guess_type(filename)
+        mime_type = mimetypes.guess_type(filename)[0]
         if not mime_type:
-            if filename.endswith('.jpg') or filename.endswith('.jpeg'):
-                mime_type = 'image/jpeg'
-            elif filename.endswith('.png'):
-                mime_type = 'image/png'
-            elif filename.endswith('.mp4'):
-                mime_type = 'video/mp4'
-            elif filename.endswith('.pdf'):
-                mime_type = 'application/pdf'
-            else:
-                mime_type = 'application/octet-stream'
+            ext = filename.split('.')[-1].lower()
+            mime_map = {
+                'jpg': 'image/jpeg', 'jpeg': 'image/jpeg', 'png': 'image/png',
+                'gif': 'image/gif', 'webp': 'image/webp', 'mp4': 'video/mp4',
+                'ogg': 'audio/ogg', 'opus': 'audio/ogg', 'mp3': 'audio/mpeg',
+                'pdf': 'application/pdf', 'doc': 'application/msword',
+                'docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
+            }
+            mime_type = mime_map.get(ext, 'application/octet-stream')
         
         # Prepara o arquivo para upload
         files = {
-            'attachment': (filename, file_content, mime_type)
+            'attachments[]': (filename, file_content, mime_type)
+        }
+        
+        # Dados da mensagem
+        data = {
+            'content': caption,
+            'message_type': 'incoming'
         }
         
         headers = {
             'api_access_token': CHATWOOT_API_TOKEN
         }
         
-        logger.info(f"📤 Enviando mídia para Chatwoot: {filename}")
-        logger.info(f"   Tamanho: {len(file_content)} bytes")
-        logger.info(f"   Tipo MIME: {mime_type}")
+        logger.info(f"📤 Enviando mídia para conversa {conversation_id}")
+        logger.info(f"   Arquivo: {filename} ({len(file_content)} bytes, {mime_type})")
         
-        response = requests.post(upload_url, headers=headers, files=files, timeout=30)
+        response = requests.post(message_url, headers=headers, files=files, data=data, timeout=30)
         
         if response.status_code == 200:
-            data = response.json()
-            # O Chatwoot retorna a URL do arquivo armazenado
-            media_url = data.get("attachment_url")
+            result = response.json()
             logger.info(f"✅ Mídia enviada ao Chatwoot com sucesso!")
-            logger.info(f"   URL: {media_url}")
-            return media_url
+            return result
         else:
-            logger.error(f"❌ Erro no upload: {response.status_code}")
-            logger.error(f"   Resposta: {response.text}")
+            logger.error(f"❌ Erro: {response.status_code}")
+            logger.error(f"   Resposta: {response.text[:500]}")
             return None
             
     except Exception as e:
         logger.error(f"❌ Erro ao fazer upload: {e}")
         return None
 
+def send_media_via_wuzapi(phone_number: str, media_url: str, media_type: str, caption: str = "") -> bool:
+    """Envia mídia via WuzAPI - versão corrigida com campo 'phone'."""
+    if not all([WUZAPI_API_URL, WUZAPI_API_TOKEN]):
+        logger.error("WuzAPI não configurada")
+        return False
+
+    headers = {"Content-Type": "application/json", "token": WUZAPI_API_TOKEN}
+    
+    try:
+        destination = clean_number_for_wuzapi(phone_number)
+        
+        logger.info(f"📤 Enviando mídia para: {destination}")
+        logger.info(f"   Tipo: {media_type}")
+        logger.info(f"   URL: {media_url[:100] if media_url else 'None'}")
+        
+        # Mapeamento de endpoints
+        endpoints = {
+            "image": f"{WUZAPI_API_URL}/chat/send/image",
+            "video": f"{WUZAPI_API_URL}/chat/send/video",
+            "audio": f"{WUZAPI_API_URL}/chat/send/audio",
+            "document": f"{WUZAPI_API_URL}/chat/send/document"
+        }
+        
+        send_url = endpoints.get(media_type, f"{WUZAPI_API_URL}/chat/send/image")
+        
+        # CORREÇÃO: usa 'phone' em vez de 'number'
+        payload = {
+            "phone": destination,
+            "caption": caption or ""
+        }
+        
+        # Adiciona o campo correto baseado no tipo
+        if media_type == "image":
+            payload["image"] = media_url
+        elif media_type == "video":
+            payload["video"] = media_url
+        elif media_type == "audio":
+            payload["audio"] = media_url
+        elif media_type == "document":
+            payload["document"] = media_url
+            payload["filename"] = "documento.pdf"
+        else:
+            payload["image"] = media_url
+        
+        logger.info(f"   Payload: {json.dumps(payload, ensure_ascii=False)[:200]}")
+        
+        response = requests.post(send_url, headers=headers, json=payload, timeout=60)
+        
+        if response.status_code == 200:
+            logger.info(f"✅ Mídia enviada com sucesso!")
+            return True
+        else:
+            logger.error(f"❌ Erro: {response.status_code} - {response.text[:200]}")
+            return False
+            
+    except Exception as e:
+        logger.error(f"❌ Erro: {e}")
+        return False
+
 def send_media_message_to_chatwoot(conversation_id: int, media_type: str, media_url: str, caption: str = "", filename: str = ""):
-    """Envia uma mensagem com mídia para o Chatwoot usando a URL do arquivo."""
+    """Envia uma mensagem com link de mídia para o Chatwoot (fallback)."""
     message_endpoint = f"{CHATWOOT_URL}/api/v1/accounts/{CHATWOOT_ACCOUNT_ID}/conversations/{conversation_id}/messages"
     
     # Formata a mensagem com a URL do arquivo
@@ -399,61 +478,16 @@ def send_media_message_to_chatwoot(conversation_id: int, media_type: str, media_
         response = requests.post(message_endpoint, headers=get_chatwoot_headers(), json=payload, timeout=10)
         
         if response.status_code == 200:
-            logger.info(f"✅ Mensagem com mídia enviada para conversa {conversation_id}")
+            logger.info(f"✅ Mensagem com link de mídia enviada para conversa {conversation_id}")
             return response.json()
         else:
-            logger.error(f"❌ Falha ao enviar mídia: {response.status_code}")
+            logger.error(f"❌ Falha ao enviar: {response.status_code}")
             logger.error(f"   Resposta: {response.text}")
             return None
             
     except Exception as e:
         logger.error(f"❌ Erro ao enviar mensagem com mídia: {e}")
         return None
-
-def send_media_via_wuzapi(phone_number: str, media_url: str, media_type: str, caption: str = ""):
-    """Envia mídia via WuzAPI."""
-    if not all([WUZAPI_API_URL, WUZAPI_API_TOKEN]):
-        logger.error("WuzAPI não configurada")
-        return False
-
-    headers = {"Content-Type": "application/json", "token": WUZAPI_API_TOKEN}
-    
-    try:
-        destination = clean_number_for_wuzapi(phone_number)
-        
-        logger.info(f"📤 Enviando mídia via WuzAPI para: {destination}")
-        logger.info(f"   Tipo: {media_type}")
-        
-        payload = {
-            "number": destination,
-            "media": media_url,
-            "caption": caption
-        }
-        
-        endpoints = {
-            "image": f"{WUZAPI_API_URL}/chat/send/image",
-            "video": f"{WUZAPI_API_URL}/chat/send/video",
-            "audio": f"{WUZAPI_API_URL}/chat/send/audio",
-            "document": f"{WUZAPI_API_URL}/chat/send/document"
-        }
-        
-        send_url = endpoints.get(media_type, f"{WUZAPI_API_URL}/chat/send/text")
-        
-        if media_type == "document":
-            payload["filename"] = "documento.pdf"
-        
-        response = requests.post(send_url, headers=headers, json=payload, timeout=30)
-        
-        if response.status_code == 200:
-            logger.info(f"✅ Mídia enviada com sucesso!")
-            return True
-        else:
-            logger.error(f"❌ Erro: {response.status_code} - {response.text}")
-            return False
-            
-    except Exception as e:
-        logger.error(f"❌ Erro: {e}")
-        return False
 
 # ============================================================
 # FUNÇÕES DE INTERAÇÃO COM O CHATWOOT
@@ -657,7 +691,7 @@ def send_message_to_conversation(conversation_id: int, message_content: str):
         logger.error(f"❌ Erro: {e}")
         return None
 
-def send_message_via_wuzapi(phone_number: str, message: str, media_url: str = None, media_type: str = None):
+def send_message_via_wuzapi(phone_number: str, message: str, media_url: str = None, media_type: str = None) -> bool:
     """Envia mensagem via WuzAPI (texto ou mídia)."""
     if not all([WUZAPI_API_URL, WUZAPI_API_TOKEN]):
         logger.error("WuzAPI não configurada")
@@ -676,11 +710,11 @@ def send_message_via_wuzapi(phone_number: str, message: str, media_url: str = No
         
         send_url = f"{WUZAPI_API_URL}/chat/send/text"
         
+        # CORREÇÃO: usa 'phone' em vez de 'number' para consistência
         payloads_to_try = [
-            {"number": destination, "text": message},
             {"phone": destination, "text": message},
+            {"number": destination, "text": message},
             {"to": destination, "text": message},
-            {"number": destination, "body": message},
             {"phone": destination, "body": message}
         ]
         
@@ -799,20 +833,13 @@ async def handle_wuzapi_webhook(request: Request):
             logger.info(f"📷 Mídia recebida: {media_type}")
             message_content = caption or f"[{media_type.upper()}]"
             
-            # Baixar mídia da WuzAPI usando o ID
-            file_content = download_media_from_wuzapi(media_id)
+            # Baixar mídia da WuzAPI
+            file_content = download_media_from_wuzapi(media_id, media_type)
             
             if file_content:
-                # Upload para o Chatwoot (será salvo em /storage)
-                uploaded_url = upload_media_to_chatwoot(int(CHATWOOT_ACCOUNT_ID), file_content, filename)
-                
-                if uploaded_url:
-                    media_url = uploaded_url
-                else:
-                    media_url = None
+                logger.info(f"✅ Mídia baixada com sucesso: {len(file_content)} bytes")
             else:
-                media_url = None
-                logger.warning("Não foi possível baixar a mídia")
+                logger.warning(f"⚠️ Não foi possível baixar a mídia {media_id}")
         else:
             # Mensagem de texto
             message_content = message_data.get("conversation") or message_data.get("body")
@@ -820,14 +847,15 @@ async def handle_wuzapi_webhook(request: Request):
             if not message_content and message_data.get("extendedTextMessage"):
                 message_content = message_data.get("extendedTextMessage", {}).get("text")
         
-        if not message_content:
+        if not message_content and not media_type:
             logger.warning("Mensagem sem conteúdo")
             return {"status": "ignored", "reason": "empty content"}
         
         sender_name = info.get("PushName") or info.get("pushName") or extract_phone_number(sender_raw)
         
         logger.info(f"📱 {sender_name} - {sender_raw}")
-        logger.info(f"💬 {message_content[:100]}")
+        if message_content:
+            logger.info(f"💬 {message_content[:100]}")
         
         contact_id = find_or_create_whatsapp_contact(sender_name, sender_raw, data)
         if not contact_id:
@@ -837,10 +865,28 @@ async def handle_wuzapi_webhook(request: Request):
         if not conversation_id:
             return {"status": "error", "reason": "conversation failed"}
         
-        # Enviar mensagem (texto ou mídia)
-        if media_type and media_id and 'media_url' in locals() and media_url:
-            result = send_media_message_to_chatwoot(conversation_id, media_type, media_url, message_content, filename)
+        # Processar mídia se houver
+        if media_type and media_id:
+            file_content = download_media_from_wuzapi(media_id, media_type)
+            
+            if file_content:
+                # Upload para o Chatwoot como anexo
+                result = upload_media_to_chatwoot(conversation_id, file_content, filename, caption or "")
+                if result:
+                    logger.info(f"✅ Mídia processada com sucesso")
+                    return {"status": "success"}
+                else:
+                    # Fallback: envia link ou mensagem informativa
+                    logger.warning("Fallback: enviando mensagem de texto informativa")
+                    fallback_msg = f"📎 [{media_type.upper()}] {filename or 'arquivo'}"
+                    if caption:
+                        fallback_msg = f"{caption}\n\n📎 [{media_type.upper()}]"
+                    send_message_to_conversation(conversation_id, fallback_msg)
+            else:
+                logger.warning(f"Não foi possível baixar a mídia {media_id}")
+                send_message_to_conversation(conversation_id, f"📎 {media_type.upper()} (não foi possível baixar)")
         else:
+            # Mensagem de texto normal
             result = send_message_to_conversation(conversation_id, message_content)
         
         if result:
@@ -917,7 +963,7 @@ async def root():
     return {
         "status": "online",
         "service": "Ponte Ricard-ZAP",
-        "version": "1.0.0"
+        "version": "1.0.1"
     }
 
 @app.get("/health")
