@@ -943,33 +943,34 @@ async def handle_wuzapi_webhook(request: Request):
         if not conversation_id:
             return {"status": "error", "reason": "conversation failed"}
         
-        # Processar mídia se houver
-        if media_type and media_id:
-            file_content = download_media_from_wuzapi(media_id, media_type)
-            
-            if file_content:
-                # Upload para o Chatwoot como anexo
-                result = upload_media_to_chatwoot(conversation_id, file_content, filename, caption or "")
-                if result:
-                    logger.info(f"✅ Mídia processada com sucesso")
-                    return {"status": "success"}
-                else:
-                    # Fallback: envia link ou mensagem informativa
-                    logger.warning("Fallback: enviando mensagem de texto informativa")
-                    fallback_msg = f"📎 [{media_type.upper()}] {filename or 'arquivo'}"
-                    if caption:
-                        fallback_msg = f"{caption}\n\n📎 [{media_type.upper()}]"
-                    send_message_to_conversation(conversation_id, fallback_msg)
-            else:
-                logger.warning(f"Não foi possível baixar a mídia {media_id}")
-                send_message_to_conversation(conversation_id, f"📎 {media_type.upper()} (não foi possível baixar)")
-        else:
-            # Mensagem de texto normal
-            result = send_message_to_conversation(conversation_id, message_content)
-        
-        if result:
+# Processar mídia se houver
+if media_type and media_id:
+    file_content = download_media_from_wuzapi(media_id, media_type)
+    
+    if file_content:
+        # Upload para o Chatwoot como anexo
+        upload_result = upload_media_to_chatwoot(conversation_id, file_content, filename, caption or "")
+        if upload_result:
+            logger.info(f"✅ Mídia processada com sucesso")
             return {"status": "success"}
-        return {"status": "error", "reason": "send failed"}
+        else:
+            # Fallback: envia link ou mensagem informativa
+            logger.warning("Fallback: enviando mensagem de texto informativa")
+            fallback_msg = f"📎 [{media_type.upper()}] {filename or 'arquivo'}"
+            if caption:
+                fallback_msg = f"{caption}\n\n📎 [{media_type.upper()}]"
+            send_message_to_conversation(conversation_id, fallback_msg)
+            return {"status": "success"}
+    else:
+        logger.warning(f"Não foi possível baixar a mídia {media_id}")
+        send_message_to_conversation(conversation_id, f"📎 {media_type.upper()} (não foi possível baixar)")
+        return {"status": "success"}
+else:
+    # Mensagem de texto normal
+    send_result = send_message_to_conversation(conversation_id, message_content)
+    if send_result:
+        return {"status": "success"}
+    return {"status": "error", "reason": "send failed"}
             
     except Exception as e:
         logger.error(f"❌ Erro: {e}", exc_info=True)
