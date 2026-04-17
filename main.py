@@ -931,26 +931,15 @@ async def handle_chatwoot_webhook(request: Request):
         
         success = False
         
-if attachments:
-    for att in attachments:
-        # Pega a URL do anexo
-        media_url = att.get("data_url") or att.get("url")
-        
-        # CORREÇÃO: Se a URL for relativa, completa com CHATWOOT_URL
-        if media_url and media_url.startswith('/'):
-            media_url = f"{CHATWOOT_URL}{media_url}"
-        elif media_url and not media_url.startswith('http'):
-            media_url = f"{CHATWOOT_URL}/{media_url.lstrip('/')}"
-        
-        media_type = att.get("file_type", "document").split('/')[0]
-        caption = content or ""
-        
-        logger.info(f"📎 Anexo detectado: {media_type}")
-        logger.info(f"   URL original: {att.get('url')}")
-        logger.info(f"   URL corrigida: {media_url}")
-        
-        success = send_media_via_wuzapi(destination, media_url, media_type, caption)
-        break
+        if attachments:
+            for att in attachments:
+                media_url = att.get("data_url") or att.get("url")
+                media_type = att.get("file_type", "document").split('/')[0]
+                caption = content or ""
+                
+                logger.info(f"📎 Anexo detectado: {media_type}")
+                success = send_media_via_wuzapi(destination, media_url, media_type, caption)
+                break
         else:
             success = send_message_via_wuzapi(destination, content)
         
